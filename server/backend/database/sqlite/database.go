@@ -104,6 +104,37 @@ func (d *DB) FindProjectInfoByPublicKey(
 	return projectInfo.DeepCopy(), nil
 }
 
+func readRowIntoProjectInfo(row *sql.Row) (*database.ProjectInfo, error) {
+	var id types.ID
+	var nameDB string
+	var ownerDB types.ID
+	var publicKeyDB string
+	var secretKey string
+	var authWebhoolURL string
+	var authWebhookMethods []string
+	var createdAt gotime.Time
+	var updatedAt gotime.Time
+
+	err := row.Scan(&id, &nameDB, &ownerDB, &publicKeyDB, &secretKey, &authWebhoolURL, &authWebhookMethods, &createdAt, &updatedAt)
+	if err != nil {
+		return nil, err
+	}
+
+	projectInfo := database.ProjectInfo{
+		ID:                 id,
+		Name:               nameDB,
+		Owner:              ownerDB,
+		PublicKey:          publicKeyDB,
+		SecretKey:          secretKey,
+		AuthWebhookURL:     authWebhoolURL,
+		AuthWebhookMethods: authWebhookMethods,
+		CreatedAt:          createdAt,
+		UpdatedAt:          updatedAt,
+	}
+
+	return &projectInfo, nil
+}
+
 // FindProjectInfoByName returns a project by the given name.
 func (d *DB) FindProjectInfoByName(
 	ctx context.Context,
@@ -117,38 +148,38 @@ func (d *DB) FindProjectInfoByName(
 
 	defer txn.Rollback()
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM projects WHERE owner_name = ?", owner.String())
-	err = rows.Scan(&id, &name, &owner, &publicKeyDB, &secretKey, &authWebhoolURL, &authWebhookMethods, &createdAt, &updatedAt)
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM projects WHERE owner_name = ? AND name = ?", owner.String(), name)
+	projectInfo, err := readRowIntoProjectInfo(rows)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", publicKey, database.ErrProjectNotFound)
-	}
-
-	raw, err := txn.First(tblProjects, "owner_name", owner.String(), name)
-	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("%s: %w", name, database.ErrProjectNotFound)
+		}
 		return nil, fmt.Errorf("find project by owner and name: %w", err)
 	}
-	if raw == nil {
-		return nil, fmt.Errorf("%s: %w", name, database.ErrProjectNotFound)
-	}
 
-	info := raw.(*database.ProjectInfo).DeepCopy()
-
-	return info, nil
+	return projectInfo.DeepCopy(), nil
 }
 
 // FindProjectInfoByID returns a project by the given id.
 func (d *DB) FindProjectInfoByID(ctx context.Context, id types.ID) (*database.ProjectInfo, error) {
-	txn := d.db.Txn(false)
-	defer txn.Abort()
-	raw, err := txn.First(tblProjects, "id", id.String())
+	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return nil, fmt.Errorf("find project by id: %w", err)
-	}
-	if raw == nil {
-		return nil, fmt.Errorf("%s: %w", id, database.ErrProjectNotFound)
+		return nil, fmt.Errorf("unable to create transction: %w", err)
 	}
 
-	return raw.(*database.ProjectInfo).DeepCopy(), nil
+	defer txn.Rollback()
+
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM projects WHERE id = ?", id)
+
+	projectInfo, err := readRowIntoProjectInfo(rows)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("%s: %w", id, database.ErrProjectNotFound)
+		}
+		return nil, fmt.Errorf("find project by id: %w", err)
+	}
+
+	return projectInfo.DeepCopy(), nil
 }
 
 // EnsureDefaultUserAndProject creates the default user and project if they do not exist.
