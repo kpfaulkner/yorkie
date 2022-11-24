@@ -41,6 +41,7 @@ const (
 	DefaultProfilingPort = 11102
 
 	DefaultAdminPort = 11103
+	DefaultAdminHost = "localhost"
 
 	DefaultHousekeepingInterval            = time.Minute
 	DefaultHousekeepingDeactivateThreshold = 7 * 24 * time.Hour
@@ -107,7 +108,7 @@ func (c *Config) RPCAddr() string {
 
 // AdminAddr returns the Admin address.
 func (c *Config) AdminAddr() string {
-	return fmt.Sprintf("localhost:%d", c.Admin.Port)
+	return fmt.Sprintf("%s:%d", c.Admin.Host, c.Admin.Port)
 }
 
 // Validate returns an error if the provided Config is invalidated.

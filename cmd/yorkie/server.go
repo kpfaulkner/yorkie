@@ -218,6 +218,12 @@ func init() {
 		server.DefaultAdminPort,
 		"Admin port",
 	)
+	cmd.Flags().StringVar(
+		&conf.Admin.Host,
+		"admin-host",
+		server.DefaultAdminHost,
+		"Admin host",
+	)
 	cmd.Flags().DurationVar(
 		&housekeepingInterval,
 		"housekeeping-interval",

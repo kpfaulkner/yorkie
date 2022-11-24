@@ -46,7 +46,8 @@ var ErrInvalidAdminPort = errors.New("invalid port number for Admin server")
 
 // Config is the configuration for creating a Server.
 type Config struct {
-	Port int `yaml:"Port"`
+	Host string `yaml:"Host"`
+	Port int    `yaml:"Port"`
 }
 
 // Validate validates the port number.
