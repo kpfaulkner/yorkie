@@ -63,47 +63,6 @@ func (d *DB) Close() error {
 	return nil
 }
 
-// FindProjectInfoByPublicKey returns a project by public key.
-func (d *DB) FindProjectInfoByPublicKey(
-	ctx context.Context,
-	publicKey string,
-) (*database.ProjectInfo, error) {
-	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
-	if err != nil {
-		return nil, fmt.Errorf("unable to create transction: %w", err)
-	}
-
-	defer txn.Rollback()
-
-	var id types.ID
-	var name string
-	var owner types.ID
-	var publicKeyDB string
-	var secretKey string
-	var authWebhoolURL string
-	var authWebhookMethods []string
-	var createdAt gotime.Time
-	var updatedAt gotime.Time
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM projects WHERE public_key = ?", publicKey)
-	err = rows.Scan(&id, &name, &owner, &publicKeyDB, &secretKey, &authWebhoolURL, &authWebhookMethods, &createdAt, &updatedAt)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", publicKey, database.ErrProjectNotFound)
-	}
-
-	projectInfo := database.ProjectInfo{
-		ID:                 id,
-		Name:               name,
-		Owner:              owner,
-		PublicKey:          publicKeyDB,
-		SecretKey:          secretKey,
-		AuthWebhookURL:     authWebhoolURL,
-		AuthWebhookMethods: authWebhookMethods,
-		CreatedAt:          createdAt,
-		UpdatedAt:          updatedAt,
-	}
-	return projectInfo.DeepCopy(), nil
-}
-
 func readRowIntoProjectInfo(row *sql.Row) (*database.ProjectInfo, error) {
 	var id types.ID
 	var nameDB string
@@ -135,6 +94,46 @@ func readRowIntoProjectInfo(row *sql.Row) (*database.ProjectInfo, error) {
 	return &projectInfo, nil
 }
 
+func readRowIntoUserInfo(row *sql.Row) (*database.UserInfo, error) {
+	var id types.ID
+	var username string
+	var hashedPassword string
+	var createdAt gotime.Time
+
+	err := row.Scan(&id, &username, &hashedPassword, &createdAt)
+	if err != nil {
+		return nil, err
+	}
+
+	userInfo := database.UserInfo{
+		ID:             id,
+		Username:       username,
+		HashedPassword: hashedPassword,
+		CreatedAt:      createdAt,
+	}
+
+	return &userInfo, nil
+}
+
+// FindProjectInfoByPublicKey returns a project by public key.
+func (d *DB) FindProjectInfoByPublicKey(
+	ctx context.Context,
+	publicKey string,
+) (*database.ProjectInfo, error) {
+	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("unable to create transaction: %w", err)
+	}
+
+	defer txn.Rollback()
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE public_key = ?", tblProjects, publicKey)
+	projectInfo, err := readRowIntoProjectInfo(rows)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", publicKey, database.ErrProjectNotFound)
+	}
+	return projectInfo.DeepCopy(), nil
+}
+
 // FindProjectInfoByName returns a project by the given name.
 func (d *DB) FindProjectInfoByName(
 	ctx context.Context,
@@ -143,12 +142,12 @@ func (d *DB) FindProjectInfoByName(
 ) (*database.ProjectInfo, error) {
 	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return nil, fmt.Errorf("unable to create transction: %w", err)
+		return nil, fmt.Errorf("unable to create transaction: %w", err)
 	}
 
 	defer txn.Rollback()
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM projects WHERE owner_name = ? AND name = ?", owner.String(), name)
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE owner_name = ? AND name = ?", tblProjects, owner.String(), name)
 	projectInfo, err := readRowIntoProjectInfo(rows)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -164,12 +163,12 @@ func (d *DB) FindProjectInfoByName(
 func (d *DB) FindProjectInfoByID(ctx context.Context, id types.ID) (*database.ProjectInfo, error) {
 	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return nil, fmt.Errorf("unable to create transction: %w", err)
+		return nil, fmt.Errorf("unable to create transaction: %w", err)
 	}
 
 	defer txn.Rollback()
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM projects WHERE id = ?", id)
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE id = ?", tblProjects, id)
 
 	projectInfo, err := readRowIntoProjectInfo(rows)
 	if err != nil {
@@ -207,27 +206,30 @@ func (d *DB) ensureDefaultUserInfo(
 	username,
 	password string,
 ) (*database.UserInfo, error) {
-	txn := d.db.Txn(true)
-	defer txn.Abort()
-
-	raw, err := txn.First(tblUsers, "username", username)
+	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
 	if err != nil {
+		return nil, fmt.Errorf("unable to create transaction: %w", err)
+	}
+
+	defer txn.Rollback()
+
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE owner_name = ? AND name = ?", tblUsers, username)
+	info, err := readRowIntoUserInfo(rows)
+	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("find user by username: %w", err)
 	}
 
-	var info *database.UserInfo
-	if raw == nil {
+	if err == sql.ErrNoRows {
 		hashedPassword, err := database.HashedPassword(password)
 		if err != nil {
 			return nil, err
 		}
 		info = database.NewUserInfo(username, hashedPassword)
 		info.ID = newID()
-		if err := txn.Insert(tblUsers, info); err != nil {
+
+		if _, err := txn.ExecContext(ctx, "INSERT INTO ? VALUES(?, ?, ?, ?)", tblUsers, info.ID, info.Username, info.HashedPassword, info.CreatedAt); err != nil {
 			return nil, fmt.Errorf("insert user: %w", err)
 		}
-	} else {
-		info = raw.(*database.UserInfo).DeepCopy()
 	}
 
 	txn.Commit()
@@ -239,25 +241,24 @@ func (d *DB) ensureDefaultProjectInfo(
 	ctx context.Context,
 	defaultUserID types.ID,
 ) (*database.ProjectInfo, error) {
-	txn := d.db.Txn(true)
-	defer txn.Abort()
-
-	raw, err := txn.First(tblProjects, "id", database.DefaultProjectID.String())
+	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
 	if err != nil {
+		return nil, fmt.Errorf("unable to create transaction: %w", err)
+	}
+
+	defer txn.Rollback()
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE id = ?", tblProjects, defaultUserID)
+
+	info, err := readRowIntoProjectInfo(rows)
+	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("find default project: %w", err)
 	}
 
-	var info *database.ProjectInfo
-	if raw == nil {
+	if err == sql.ErrNoRows {
 		info = database.NewProjectInfo(database.DefaultProjectName, defaultUserID)
 		info.ID = database.DefaultProjectID
-		if err := txn.Insert(tblProjects, info); err != nil {
-			return nil, fmt.Errorf("insert project: %w", err)
-		}
-	} else {
-		info = raw.(*database.ProjectInfo).DeepCopy()
+		txn.ExecContext(ctx, "INSERT INTO ? VALUES(?,?,?,?,?,?,?,?,?);", tblProjects, info.ID, info.Name, info.Owner, info.PublicKey, info.SecretKey, info.AuthWebhookURL, info.AuthWebhookMethods, info.CreatedAt, info.UpdatedAt)
 	}
-
 	txn.Commit()
 	return info, nil
 }
