@@ -63,7 +63,7 @@ func (d *DB) Close() error {
 	return nil
 }
 
-func readRowIntoProjectInfo(row *sql.Row) (*database.ProjectInfo, error) {
+func XXXreadRowIntoProjectInfo(row *sql.Row) (*database.ProjectInfo, error) {
 	var id types.ID
 	var nameDB string
 	var ownerDB types.ID
@@ -75,6 +75,37 @@ func readRowIntoProjectInfo(row *sql.Row) (*database.ProjectInfo, error) {
 	var updatedAt gotime.Time
 
 	err := row.Scan(&id, &nameDB, &ownerDB, &publicKeyDB, &secretKey, &authWebhoolURL, &authWebhookMethods, &createdAt, &updatedAt)
+	if err != nil {
+		return nil, err
+	}
+
+	projectInfo := database.ProjectInfo{
+		ID:                 id,
+		Name:               nameDB,
+		Owner:              ownerDB,
+		PublicKey:          publicKeyDB,
+		SecretKey:          secretKey,
+		AuthWebhookURL:     authWebhoolURL,
+		AuthWebhookMethods: authWebhookMethods,
+		CreatedAt:          createdAt,
+		UpdatedAt:          updatedAt,
+	}
+
+	return &projectInfo, nil
+}
+
+func readRowIntoProjectInfo(scan func(dest ...any) error) (*database.ProjectInfo, error) {
+	var id types.ID
+	var nameDB string
+	var ownerDB types.ID
+	var publicKeyDB string
+	var secretKey string
+	var authWebhoolURL string
+	var authWebhookMethods []string
+	var createdAt gotime.Time
+	var updatedAt gotime.Time
+
+	err := scan(&id, &nameDB, &ownerDB, &publicKeyDB, &secretKey, &authWebhoolURL, &authWebhookMethods, &createdAt, &updatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +158,7 @@ func (d *DB) FindProjectInfoByPublicKey(
 
 	defer txn.Rollback()
 	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE public_key = ?", tblProjects, publicKey)
-	projectInfo, err := readRowIntoProjectInfo(rows)
+	projectInfo, err := readRowIntoProjectInfo(rows.Scan)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", publicKey, database.ErrProjectNotFound)
 	}
@@ -145,10 +176,13 @@ func (d *DB) FindProjectInfoByName(
 		return nil, fmt.Errorf("unable to create transaction: %w", err)
 	}
 
+	// unsure about rollback here. Basically an abort... but if devops
+	// are monitoring the database, they might see a lot of aborted
+	// TODO(kpfaulkner)
 	defer txn.Rollback()
 
 	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE owner_name = ? AND name = ?", tblProjects, owner.String(), name)
-	projectInfo, err := readRowIntoProjectInfo(rows)
+	projectInfo, err := readRowIntoProjectInfo(rows.Scan)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("%s: %w", name, database.ErrProjectNotFound)
@@ -166,11 +200,14 @@ func (d *DB) FindProjectInfoByID(ctx context.Context, id types.ID) (*database.Pr
 		return nil, fmt.Errorf("unable to create transaction: %w", err)
 	}
 
+	// unsure about rollback here. Basically an abort... but if devops
+	// are monitoring the database, they might see a lot of aborted
+	// TODO(kpfaulkner)
 	defer txn.Rollback()
 
 	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE id = ?", tblProjects, id)
 
-	projectInfo, err := readRowIntoProjectInfo(rows)
+	projectInfo, err := readRowIntoProjectInfo(rows.Scan)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("%s: %w", id, database.ErrProjectNotFound)
@@ -249,7 +286,7 @@ func (d *DB) ensureDefaultProjectInfo(
 	defer txn.Rollback()
 	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE id = ?", tblProjects, defaultUserID)
 
-	info, err := readRowIntoProjectInfo(rows)
+	info, err := readRowIntoProjectInfo(rows.Scan)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("find default project: %w", err)
 	}
@@ -271,6 +308,11 @@ func insertProjectInfo(ctx context.Context, txn *sql.Tx, info *database.ProjectI
 	return err
 }
 
+func insertUserInfo(ctx context.Context, txn *sql.Tx, info *database.UserInfo) error {
+	_, err := txn.ExecContext(ctx, "INSERT INTO ? VALUES(?,?,?,?);", tblUsers, info.ID, info.Username, info.HashedPassword, info.CreatedAt)
+	return err
+}
+
 // CreateProjectInfo creates a new project.
 func (d *DB) CreateProjectInfo(
 	ctx context.Context,
@@ -284,7 +326,7 @@ func (d *DB) CreateProjectInfo(
 	defer txn.Rollback()
 
 	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE owner_name = ? AND name = ?", tblProjects, owner.String(), name)
-	projectInfo, err := readRowIntoProjectInfo(rows)
+	projectInfo, err := readRowIntoProjectInfo(rows.Scan)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("find project by owner and name: %w", err)
 	}
@@ -309,29 +351,25 @@ func (d *DB) ListProjectInfos(
 	ctx context.Context,
 	owner types.ID,
 ) ([]*database.ProjectInfo, error) {
-	txn := d.db.Txn(false)
-	defer txn.Abort()
-
-	iter, err := txn.LowerBound(
-		tblProjects,
-		"owner_name",
-		owner.String(),
-		"",
-	)
+	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return nil, fmt.Errorf("fetch projects by owner and name: %w", err)
+		return nil, fmt.Errorf("unable to create transaction: %w", err)
 	}
+	defer txn.Rollback()
 
 	var infos []*database.ProjectInfo
-	for raw := iter.Next(); raw != nil; raw = iter.Next() {
-		info := raw.(*database.ProjectInfo).DeepCopy()
+	rows, err := txn.QueryContext(ctx, "SELECT * FROM ? WHERE owner_name = ?", tblProjects, owner.String())
+	for rows.Next() {
+		pi, err := readRowIntoProjectInfo(rows.Scan)
+		if err != nil {
+			return nil, fmt.Errorf("read row into project info: %w", err)
+		}
+		info := pi.DeepCopy()
 		if info.Owner != owner {
 			break
 		}
-
 		infos = append(infos, info)
 	}
-
 	return infos, nil
 }
 
@@ -342,24 +380,29 @@ func (d *DB) UpdateProjectInfo(
 	id types.ID,
 	fields *types.UpdatableProjectFields,
 ) (*database.ProjectInfo, error) {
-	txn := d.db.Txn(true)
-	defer txn.Abort()
-
-	raw, err := txn.First(tblProjects, "id", id.String())
+	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
 	if err != nil {
+		return nil, fmt.Errorf("unable to create transaction: %w", err)
+	}
+
+	defer txn.Rollback()
+
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE id = ?", tblProjects, id)
+	projectInfo, err := readRowIntoProjectInfo(rows.Scan)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("%s: %w", id, database.ErrProjectNotFound)
+		}
 		return nil, fmt.Errorf("find project by id: %w", err)
 	}
-	if raw == nil {
-		return nil, fmt.Errorf("%s: %w", id, database.ErrProjectNotFound)
-	}
 
-	info := raw.(*database.ProjectInfo).DeepCopy()
+	info := projectInfo.DeepCopy()
 	if info.Owner != owner {
 		return nil, fmt.Errorf("%s: %w", id, database.ErrProjectNotFound)
 	}
 
 	if fields.Name != nil {
-		existing, err := txn.First(tblProjects, "owner_name", owner.String(), *fields.Name)
+		existing, err := d.FindProjectInfoByName(ctx, owner, *fields.Name)
 		if err != nil {
 			return nil, fmt.Errorf("find project by owner and name: %w", err)
 		}
@@ -370,11 +413,13 @@ func (d *DB) UpdateProjectInfo(
 
 	info.UpdateFields(fields)
 	info.UpdatedAt = gotime.Now()
-	if err := txn.Insert(tblProjects, info); err != nil {
+
+	// update... we KNOW it already exists (checks above).
+	if _, err := txn.ExecContext(ctx, "UPDATE ? SET name=?,authwebhook=?, authwebhookmethods=?, updatedat=? where id=?;", tblProjects, info.Name,
+		info.AuthWebhookURL, info.AuthWebhookMethods, info.UpdatedAt, info.ID); err != nil {
 		return nil, fmt.Errorf("update project: %w", err)
 	}
 	txn.Commit()
-
 	return info, nil
 }
 
@@ -384,20 +429,26 @@ func (d *DB) CreateUserInfo(
 	username string,
 	hashedPassword string,
 ) (*database.UserInfo, error) {
-	txn := d.db.Txn(true)
-	defer txn.Abort()
-
-	existing, err := txn.First(tblUsers, "username", username)
+	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
 	if err != nil {
-		return nil, fmt.Errorf("find user by username: %w", err)
+		return nil, fmt.Errorf("unable to create transaction: %w", err)
 	}
-	if existing != nil {
+	defer txn.Rollback()
+
+	row := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE username = ?", tblUsers, username)
+	userInfo, err := readRowIntoUserInfo(row)
+	if err != nil && err != sql.ErrNoRows {
+		return nil, fmt.Errorf("find username: %w", err)
+	}
+
+	if userInfo != nil {
 		return nil, fmt.Errorf("%s: %w", username, database.ErrUserAlreadyExists)
 	}
 
 	info := database.NewUserInfo(username, hashedPassword)
 	info.ID = newID()
-	if err := txn.Insert(tblUsers, info); err != nil {
+	
+	if err := insertUserInfo(ctx, txn, info); err != nil {
 		return nil, fmt.Errorf("insert user: %w", err)
 	}
 	txn.Commit()
