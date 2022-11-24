@@ -125,13 +125,13 @@ func readRowIntoProjectInfo(scan func(dest ...any) error) (*database.ProjectInfo
 	return &projectInfo, nil
 }
 
-func readRowIntoUserInfo(row *sql.Row) (*database.UserInfo, error) {
+func readRowIntoUserInfo(scan func(dest ...any) error) (*database.UserInfo, error) {
 	var id types.ID
 	var username string
 	var hashedPassword string
 	var createdAt gotime.Time
 
-	err := row.Scan(&id, &username, &hashedPassword, &createdAt)
+	err := scan(&id, &username, &hashedPassword, &createdAt)
 	if err != nil {
 		return nil, err
 	}
@@ -251,7 +251,7 @@ func (d *DB) ensureDefaultUserInfo(
 	defer txn.Rollback()
 
 	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE owner_name = ? AND name = ?", tblUsers, username)
-	info, err := readRowIntoUserInfo(rows)
+	info, err := readRowIntoUserInfo(rows.Scan)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("find user by username: %w", err)
 	}
@@ -436,7 +436,7 @@ func (d *DB) CreateUserInfo(
 	defer txn.Rollback()
 
 	row := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE username = ?", tblUsers, username)
-	userInfo, err := readRowIntoUserInfo(row)
+	userInfo, err := readRowIntoUserInfo(row.Scan)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("find username: %w", err)
 	}
@@ -447,7 +447,7 @@ func (d *DB) CreateUserInfo(
 
 	info := database.NewUserInfo(username, hashedPassword)
 	info.ID = newID()
-	
+
 	if err := insertUserInfo(ctx, txn, info); err != nil {
 		return nil, fmt.Errorf("insert user: %w", err)
 	}
@@ -458,41 +458,52 @@ func (d *DB) CreateUserInfo(
 
 // FindUserInfo finds a user by the given username.
 func (d *DB) FindUserInfo(ctx context.Context, username string) (*database.UserInfo, error) {
-	txn := d.db.Txn(false)
-	defer txn.Abort()
-
-	raw, err := txn.First(tblUsers, "username", username)
+	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
+		return nil, fmt.Errorf("unable to create transaction: %w", err)
+	}
+
+	// unsure about rollback here. Basically an abort... but if devops
+	// are monitoring the database, they might see a lot of aborted
+	// TODO(kpfaulkner)
+	defer txn.Rollback()
+
+	row := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE username = ? ", tblUsers, username)
+	userInfo, err := readRowIntoUserInfo(row.Scan)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("%s: %w", username, database.ErrUserNotFound)
+		}
 		return nil, fmt.Errorf("find user by username: %w", err)
 	}
-	if raw == nil {
-		return nil, fmt.Errorf("%s: %w", username, database.ErrUserNotFound)
-	}
 
-	return raw.(*database.UserInfo).DeepCopy(), nil
+	return userInfo.DeepCopy(), nil
 }
 
 // ListUserInfos returns all users.
 func (d *DB) ListUserInfos(
 	ctx context.Context,
 ) ([]*database.UserInfo, error) {
-	txn := d.db.Txn(false)
-	defer txn.Abort()
+	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("unable to create transaction: %w", err)
+	}
+	defer txn.Rollback()
 
-	iter, err := txn.Get(tblUsers, "id")
+	var infos []*database.UserInfo
+	rows, err := txn.QueryContext(ctx, "SELECT * FROM ?", tblUsers)
 	if err != nil {
 		return nil, fmt.Errorf("fetch users: %w", err)
 	}
 
-	var infos []*database.UserInfo
-	for {
-		raw := iter.Next()
-		if raw == nil {
-			break
+	for rows.Next() {
+		pi, err := readRowIntoUserInfo(rows.Scan)
+		if err != nil {
+			return nil, fmt.Errorf("read row into user info: %w", err)
 		}
-		infos = append(infos, raw.(*database.UserInfo).DeepCopy())
+		info := pi.DeepCopy()
+		infos = append(infos, info)
 	}
-
 	return infos, nil
 }
 
