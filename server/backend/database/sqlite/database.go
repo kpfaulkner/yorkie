@@ -257,10 +257,18 @@ func (d *DB) ensureDefaultProjectInfo(
 	if err == sql.ErrNoRows {
 		info = database.NewProjectInfo(database.DefaultProjectName, defaultUserID)
 		info.ID = database.DefaultProjectID
-		txn.ExecContext(ctx, "INSERT INTO ? VALUES(?,?,?,?,?,?,?,?,?);", tblProjects, info.ID, info.Name, info.Owner, info.PublicKey, info.SecretKey, info.AuthWebhookURL, info.AuthWebhookMethods, info.CreatedAt, info.UpdatedAt)
+		if err = insertProjectInfo(ctx, txn, info); err != nil {
+			return nil, fmt.Errorf("insert project: %w", err)
+		}
 	}
 	txn.Commit()
 	return info, nil
+}
+
+func insertProjectInfo(ctx context.Context, txn *sql.Tx, info *database.ProjectInfo) error {
+	_, err := txn.ExecContext(ctx, "INSERT INTO ? VALUES(?,?,?,?,?,?,?,?,?);", tblProjects, info.ID, info.Name,
+		info.Owner, info.PublicKey, info.SecretKey, info.AuthWebhookURL, info.AuthWebhookMethods, info.CreatedAt, info.UpdatedAt)
+	return err
 }
 
 // CreateProjectInfo creates a new project.
@@ -269,23 +277,27 @@ func (d *DB) CreateProjectInfo(
 	name string,
 	owner types.ID,
 ) (*database.ProjectInfo, error) {
-	txn := d.db.Txn(true)
-	defer txn.Abort()
-
-	// NOTE(hackerwins): Check if the project already exists.
-	// https://github.com/hashicorp/go-memdb/issues/7#issuecomment-270427642
-	existing, err := txn.First(tblProjects, "owner_name", owner.String(), name)
+	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
 	if err != nil {
+		return nil, fmt.Errorf("unable to create transaction: %w", err)
+	}
+	defer txn.Rollback()
+
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE owner_name = ? AND name = ?", tblProjects, owner.String(), name)
+	projectInfo, err := readRowIntoProjectInfo(rows)
+	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("find project by owner and name: %w", err)
 	}
-	if existing != nil {
+
+	if projectInfo != nil {
 		return nil, fmt.Errorf("%s: %w", name, database.ErrProjectAlreadyExists)
 	}
 
 	info := database.NewProjectInfo(name, owner)
 	info.ID = newID()
-	if err := txn.Insert(tblProjects, info); err != nil {
-		return nil, fmt.Errorf("insert project: %w", err)
+
+	if err := insertProjectInfo(ctx, txn, info); err != nil {
+		return nil, fmt.Errorf("insert user: %w", err)
 	}
 	txn.Commit()
 
