@@ -95,6 +95,36 @@ func XXXreadRowIntoProjectInfo(row *sql.Row) (*database.ProjectInfo, error) {
 	return &projectInfo, nil
 }
 
+// TODO(kpfaulkner) operations will blow up... need to sort that out.
+func readRowIntoChangeInfo(scan func(dest ...any) error) (*database.ChangeInfo, error) {
+	var id types.ID
+	var docID types.ID
+	var serverSeq int64
+	var clientSeq uint32
+	var lamport int64
+	var actorID types.ID
+	var message string
+	var operations [][]byte
+
+	err := scan(&id, &docID, &serverSeq, &clientSeq, &lamport, &actorID, &message, &operations)
+	if err != nil {
+		return nil, err
+	}
+
+	changeInfo := database.ChangeInfo{
+		ID:         id,
+		DocID:      docID,
+		ServerSeq:  serverSeq,
+		ClientSeq:  clientSeq,
+		Lamport:    lamport,
+		ActorID:    actorID,
+		Message:    message,
+		Operations: operations,
+	}
+
+	return &changeInfo, nil
+}
+
 func readRowIntoProjectInfo(scan func(dest ...any) error) (*database.ProjectInfo, error) {
 	var id types.ID
 	var nameDB string
@@ -154,6 +184,32 @@ func readRowIntoClientInfo(scan func(dest ...any) error) (*database.ClientInfo, 
 	}
 
 	return &clientInfo, nil
+}
+
+func readRowIntoSyncedSeqInfo(scan func(dest ...any) error) (*database.SyncedSeqInfo, error) {
+
+	var id types.ID
+	var docID types.ID
+	var clientID types.ID
+	var lamport int64
+	var actorID types.ID
+	var serverSeq int64
+
+	err := scan(&id, &docID, &clientID, &lamport, &actorID, &serverSeq)
+	if err != nil {
+		return nil, err
+	}
+
+	syncedSeqInfo := database.SyncedSeqInfo{
+		ID:        id,
+		DocID:     docID,
+		ClientID:  clientID,
+		Lamport:   lamport,
+		ActorID:   actorID,
+		ServerSeq: serverSeq,
+	}
+
+	return &syncedSeqInfo, nil
 }
 
 func readRowIntoDocInfo(scan func(dest ...any) error) (*database.DocInfo, error) {
@@ -934,8 +990,6 @@ func (d *DB) CreateChangeInfos(
 		return fmt.Errorf("find document by key: %w", err)
 	}
 
-	/////////
-
 	if loadedDocInfo.ServerSeq != initialServerSeq {
 		return fmt.Errorf("%s: %w", docInfo.ID, database.ErrConflictOnUpdate)
 	}
@@ -959,45 +1013,50 @@ func (d *DB) PurgeStaleChanges(
 	ctx context.Context,
 	docID types.ID,
 ) error {
-	txn := d.db.Txn(true)
-	defer txn.Abort()
-
-	// Find the smallest server seq in `syncedseqs`.
-	// Because offline client can pull changes when it becomes online.
-	it, err := txn.Get(tblSyncedSeqs, "id")
+	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
 	if err != nil {
-		return fmt.Errorf("fetch syncedseqs: %w", err)
+		return fmt.Errorf("unable to create transaction: %w", err)
 	}
+	defer txn.Rollback()
 
 	minSyncedServerSeq := change.MaxServerSeq
-	for raw := it.Next(); raw != nil; raw = it.Next() {
-		info := raw.(*database.SyncedSeqInfo)
-		if info.DocID == docID && info.ServerSeq < minSyncedServerSeq {
-			minSyncedServerSeq = info.ServerSeq
-		}
+
+	// We want the smallest syncedseqs for a given docID
+	// Logic a bit different to memdb.. TODO(kpfaulkner) go over this again.
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE docid = ? ORDER BY serverseq", tblSyncedSeqs, docID)
+	info, err := readRowIntoSyncedSeqInfo(rows.Scan)
+	if err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("fetch syncedseqs: %w", err)
+	} else if err == sql.ErrNoRows {
+		// no rows.. nothing to do... bail
+		return nil
 	}
+
+	minSyncedServerSeq = info.ServerSeq
 	if minSyncedServerSeq == change.MaxServerSeq {
 		return nil
 	}
 
-	// Delete all changes before the smallest server seq.
-	iterator, err := txn.ReverseLowerBound(
-		tblChanges,
-		"doc_id_server_seq",
-		docID.String(),
-		minSyncedServerSeq,
-	)
-	if err != nil {
-		return fmt.Errorf("fetch changes before %d: %w", minSyncedServerSeq, err)
+	changesRows, err := txn.QueryContext(ctx, "SELECT * FROM ? WHERE docid= ? AND serverseq <= ?", tblChanges, docID, minSyncedServerSeq)
+	if err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("fetch syncedseqs: %w", err)
 	}
+	for changesRows.Next() {
+		info, err := readRowIntoSyncedSeqInfo(rows.Scan)
+		if err != nil && err != sql.ErrNoRows {
+			return fmt.Errorf("fetch syncedseqs: %w", err)
+		} else if err == sql.ErrNoRows {
+			// return nil... we have nothing to purge and no errors.
+			return nil
+		}
 
-	for raw := iterator.Next(); raw != nil; raw = iterator.Next() {
-		info := raw.(*database.ChangeInfo)
-		if err = txn.Delete(tblChanges, info); err != nil {
-			return fmt.Errorf("delete change %s: %w", info.ID, err)
+		if _, err := txn.ExecContext(ctx, "DELETE FROM ? WHERE id = ?", tblChanges, info.ID); err != nil {
+			return fmt.Errorf("delete change: %w", err)
 		}
 	}
-	return nil
+
+	err = txn.Commit()
+	return err
 }
 
 // FindChangesBetweenServerSeqs returns the changes between two server sequences.
@@ -1032,28 +1091,37 @@ func (d *DB) FindChangeInfosBetweenServerSeqs(
 	from int64,
 	to int64,
 ) ([]*database.ChangeInfo, error) {
-	txn := d.db.Txn(false)
-	defer txn.Abort()
+
+	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
+	if err != nil {
+		return nil, fmt.Errorf("unable to create transaction: %w", err)
+	}
+
+	defer txn.Rollback()
 
 	var infos []*database.ChangeInfo
 
-	iterator, err := txn.LowerBound(
-		tblChanges,
-		"doc_id_server_seq",
-		docID.String(),
-		from,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("fetch changes from %d: %w", from, err)
+	changesRows, err := txn.QueryContext(ctx, "SELECT * FROM ? WHERE docid= ? AND serverseq >= ? AND serverseq < ?", tblChanges, docID, from, to)
+	if err != nil && err != sql.ErrNoRows {
+		return nil, fmt.Errorf("fetch syncedseqs: %w", err)
 	}
 
-	for raw := iterator.Next(); raw != nil; raw = iterator.Next() {
-		info := raw.(*database.ChangeInfo)
+	for changesRows.Next() {
+		info, err := readRowIntoChangeInfo(changesRows.Scan)
+		if err != nil && err != sql.ErrNoRows {
+			return nil, fmt.Errorf("fetch changes from %d: %w", from, err)
+		} else if err == sql.ErrNoRows {
+			// return nil... we have nothing to purge and no errors.
+			break
+		}
+
+		// TODO(kpfaulkner) can remove later.
 		if info.DocID != docID || info.ServerSeq > to {
 			break
 		}
 		infos = append(infos, info)
 	}
+
 	return infos, nil
 }
 
