@@ -22,7 +22,6 @@ import (
 	"fmt"
 	gotime "time"
 
-	"github.com/hashicorp/go-memdb"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	_ "modernc.org/sqlite"
 
@@ -1018,7 +1017,7 @@ func (d *DB) PurgeStaleChanges(
 
 	// We want the smallest syncedseqs for a given docID
 	// Logic a bit different to memdb.. TODO(kpfaulkner) go over this again.
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE docid = ? ORDER BY serverseq", tblSyncedSeqs, docID)
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE docid = ? ORDER BY serverseq ASC", tblSyncedSeqs, docID)
 	info, err := readRowIntoSyncedSeqInfo(rows.Scan)
 	if err != nil && err != sql.ErrNoRows {
 		return fmt.Errorf("fetch syncedseqs: %w", err)
@@ -1194,62 +1193,55 @@ func (d *DB) FindMinSyncedSeqInfo(
 	ctx context.Context,
 	docID types.ID,
 ) (*database.SyncedSeqInfo, error) {
-	txn := d.db.Txn(false)
-	defer txn.Abort()
 
-	it, err := txn.Get(tblSyncedSeqs, "id")
+	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return nil, fmt.Errorf("fetch syncedseqs: %w", err)
+		return nil, fmt.Errorf("unable to create transaction: %w", err)
 	}
 
-	syncedSeqInfo := &database.SyncedSeqInfo{}
-	minSyncedServerSeq := change.MaxServerSeq
-	for raw := it.Next(); raw != nil; raw = it.Next() {
-		info := raw.(*database.SyncedSeqInfo)
-		if info.DocID == docID && info.ServerSeq < minSyncedServerSeq {
-			minSyncedServerSeq = info.ServerSeq
-			syncedSeqInfo = info
-		}
-	}
-	if minSyncedServerSeq == change.MaxServerSeq {
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE docid = ? ORDER BY serverseq ASC", tblSyncedSeqs, docID)
+	info, err := readRowIntoSyncedSeqInfo(rows.Scan)
+	if err != nil && err != sql.ErrNoRows {
+		return nil, fmt.Errorf("fetch syncedseqs: %w", err)
+	} else if err == sql.ErrNoRows {
 		return nil, nil
 	}
 
-	return syncedSeqInfo, nil
+	if info.ServerSeq == change.MaxServerSeq {
+		return nil, nil
+	}
+
+	return info, nil
 }
 
 // UpdateAndFindMinSyncedTicket updates the given serverSeq of the given client
 // and returns the min synced ticket.
+// TODO(kpfaulkner). REALLY unsure about the logic here...  need to check txn.LowerBound (memdb) to make sure I've
+// got the correct logic here. I think the code should be simple either way, but I'm unclear about if we're after
+// largest or smallest server seq.
 func (d *DB) UpdateAndFindMinSyncedTicket(
 	ctx context.Context,
 	clientInfo *database.ClientInfo,
 	docID types.ID,
 	serverSeq int64,
 ) (*time.Ticket, error) {
+
 	if err := d.UpdateSyncedSeq(ctx, clientInfo, docID, serverSeq); err != nil {
 		return nil, err
 	}
 
-	txn := d.db.Txn(false)
-	defer txn.Abort()
-
-	iterator, err := txn.LowerBound(
-		tblSyncedSeqs,
-		"doc_id_lamport_actor_id",
-		docID.String(),
-		int64(0),
-		time.InitialActorID.String(),
-	)
+	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return nil, fmt.Errorf("fetch smallest syncedseq of %s: %w", docID.String(), err)
+		return nil, fmt.Errorf("unable to create transaction: %w", err)
 	}
+	defer txn.Rollback()
 
-	var syncedSeqInfo *database.SyncedSeqInfo
-	if raw := iterator.Next(); raw != nil {
-		info := raw.(*database.SyncedSeqInfo)
-		if info.DocID == docID {
-			syncedSeqInfo = info
-		}
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE docid = ? AND lamport = ? AND actorid = ? ORDER BY serverseq ASC", tblSyncedSeqs, docID, 0, time.InitialActorID.String())
+	syncedSeqInfo, err := readRowIntoSyncedSeqInfo(rows.Scan)
+	if err != nil && err != sql.ErrNoRows {
+		return nil, fmt.Errorf("fetch syncedseqs: %w", err)
+	} else if err == sql.ErrNoRows {
+		return nil, nil
 	}
 
 	if syncedSeqInfo == nil || syncedSeqInfo.ServerSeq == change.InitialServerSeq {
@@ -1275,8 +1267,11 @@ func (d *DB) UpdateSyncedSeq(
 	docID types.ID,
 	serverSeq int64,
 ) error {
-	txn := d.db.Txn(true)
-	defer txn.Abort()
+	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return fmt.Errorf("unable to create transaction: %w", err)
+	}
+	defer txn.Rollback()
 
 	isAttached, err := clientInfo.IsAttached(docID)
 	if err != nil {
@@ -1284,17 +1279,14 @@ func (d *DB) UpdateSyncedSeq(
 	}
 
 	if !isAttached {
-		if _, err = txn.DeleteAll(
-			tblSyncedSeqs,
-			"doc_id_client_id",
-			docID.String(),
-			clientInfo.ID.String(),
-		); err != nil {
+		if _, err := txn.ExecContext(ctx, "DELETE FROM ? WHERE id = ? AND clientid = ?", tblSyncedSeqs, docID.String(), clientInfo.ID.String()); err != nil {
 			return fmt.Errorf("delete syncedseqs of %s: %w", docID.String(), err)
 		}
 		txn.Commit()
 		return nil
 	}
+
+	/////////////////////////////
 
 	ticket, err := d.findTicketByServerSeq(txn, docID, serverSeq)
 	if err != nil {
@@ -1311,13 +1303,13 @@ func (d *DB) UpdateSyncedSeq(
 		return nil
 	}
 
-	raw, err := txn.First(
-		tblSyncedSeqs,
-		"doc_id_client_id",
-		docID.String(),
-		clientInfo.ID.String(),
-	)
+	noRows := false
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE docid = ? AND clientid = ? ORDER BY serverseq ASC", tblSyncedSeqs, docID, clientInfo.ID.String())
+	info, err := readRowIntoSyncedSeqInfo(rows.Scan)
 	if err != nil {
+		if err == sql.ErrNoRows {
+			noRows = true
+		}
 		return fmt.Errorf("fetch syncedseqs of %s: %w", docID.String(), err)
 	}
 
@@ -1328,16 +1320,21 @@ func (d *DB) UpdateSyncedSeq(
 		ActorID:   types.ID(ticket.ActorID().String()),
 		ServerSeq: serverSeq,
 	}
-	if raw == nil {
+	if noRows {
+		// insert
 		syncedSeqInfo.ID = newID()
+		if _, err := txn.ExecContext(ctx, "INSERT INTO ? VALUES(?, ?, ?, ?,?, ?, ?, ?)",
+			tblSyncedSeqs, syncedSeqInfo.ID, syncedSeqInfo.DocID, syncedSeqInfo.ClientID, syncedSeqInfo.Lamport, syncedSeqInfo.ActorID, syncedSeqInfo.ServerSeq); err != nil {
+			return fmt.Errorf("insert syncedseqs of %s: %w", docID.String(), err)
+		}
 	} else {
-		syncedSeqInfo.ID = raw.(*database.SyncedSeqInfo).ID
+		// update
+		syncedSeqInfo.ID = info.ID
+		if _, err := txn.ExecContext(ctx, "UPDATE ? SET docid=?,clientid=?, lamport=?, actorid=?, serverseq=? where id=?",
+			tblSyncedSeqs, syncedSeqInfo.DocID, syncedSeqInfo.ClientID, syncedSeqInfo.Lamport, syncedSeqInfo.ActorID, syncedSeqInfo.ServerSeq, syncedSeqInfo.ID); err != nil {
+			return fmt.Errorf("update syncedseqs of %s: %w", docID.String(), err)
+		}
 	}
-
-	if err := txn.Insert(tblSyncedSeqs, syncedSeqInfo); err != nil {
-		return fmt.Errorf("insert syncedseqs of %s: %w", docID.String(), err)
-	}
-
 	txn.Commit()
 	return nil
 }
@@ -1348,38 +1345,37 @@ func (d *DB) FindDocInfosByPaging(
 	projectID types.ID,
 	paging types.Paging[types.ID],
 ) ([]*database.DocInfo, error) {
-	txn := d.db.Txn(false)
-	defer txn.Abort()
 
-	var iterator memdb.ResultIterator
 	var err error
-	if paging.IsForward {
-		iterator, err = txn.LowerBound(
-			tblDocuments,
-			"project_id_id",
-			projectID.String(),
-			paging.Offset.String(),
-		)
-	} else {
-		offset := paging.Offset
-		if paging.Offset == "" {
-			offset = types.IDFromActorID(time.MaxActorID)
-		}
-
-		iterator, err = txn.ReverseLowerBound(
-			tblDocuments,
-			"project_id_id",
-			projectID.String(),
-			offset.String(),
-		)
-	}
+	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
+		return nil, fmt.Errorf("unable to create transaction: %w", err)
+	}
+	defer txn.Rollback()
+
+	var offset string
+	if paging.IsForward {
+		offset = paging.Offset.String()
+	} else {
+		offset = paging.Offset.String()
+		if paging.Offset == "" {
+			offset = string(types.IDFromActorID(time.MaxActorID))
+		}
+	}
+
+	// TODO(kpfaulkner) figure out the offset?
+	rows, err := txn.QueryContext(ctx, "SELECT * FROM ? WHERE projectid = ? AND id >= ?", tblDocuments, projectID.String(), offset)
+	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("fetch documents of %s: %w", projectID.String(), err)
 	}
 
 	var docInfos []*database.DocInfo
-	for raw := iterator.Next(); raw != nil; raw = iterator.Next() {
-		info := raw.(*database.DocInfo)
+	for rows.Next() {
+		info, err := readRowIntoDocInfo(rows.Scan)
+		if err != nil && err != sql.ErrNoRows {
+			return nil, fmt.Errorf("fetch docinfo: %w", err)
+		}
+
 		if len(docInfos) >= paging.PageSize || info.ProjectID != projectID {
 			break
 		}
@@ -1388,7 +1384,6 @@ func (d *DB) FindDocInfosByPaging(
 			docInfos = append(docInfos, info)
 		}
 	}
-
 	return docInfos, nil
 }
 
@@ -1399,21 +1394,29 @@ func (d *DB) FindDocInfosByQuery(
 	query string,
 	pageSize int,
 ) (*types.SearchResult[*database.DocInfo], error) {
-	txn := d.db.Txn(false)
-	defer txn.Abort()
-
-	iterator, err := txn.Get(tblDocuments, "project_id_key_prefix", projectID.String(), query)
+	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
+		return nil, fmt.Errorf("unable to create transaction: %w", err)
+	}
+	defer txn.Rollback()
+
+	// key has prefix?
+	rows, err := txn.QueryContext(ctx, "SELECT * FROM ? WHERE projectid = ? AND key like '?%'", tblDocuments, projectID.String(), query)
+	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("find docInfos by query: %w", err)
 	}
 
+	/////////////////////
+
 	var docInfos []*database.DocInfo
 	count := 0
-	for raw := iterator.Next(); raw != nil; raw = iterator.Next() {
-		if count < pageSize {
-			info := raw.(*database.DocInfo)
-			docInfos = append(docInfos, info)
+
+	for rows.Next() {
+		docInfo, err := readRowIntoDocInfo(rows.Scan)
+		if err != nil && err != sql.ErrNoRows {
+			return nil, fmt.Errorf("fetch docinfo: %w", err)
 		}
+		docInfos = append(docInfos, docInfo)
 		count++
 	}
 
@@ -1424,7 +1427,7 @@ func (d *DB) FindDocInfosByQuery(
 }
 
 func (d *DB) findTicketByServerSeq(
-	txn *memdb.Txn,
+	txn *sql.Tx,
 	docID types.ID,
 	serverSeq int64,
 ) (*time.Ticket, error) {
@@ -1432,25 +1435,21 @@ func (d *DB) findTicketByServerSeq(
 		return time.InitialTicket, nil
 	}
 
-	raw, err := txn.First(
-		tblChanges,
-		"doc_id_server_seq",
-		docID.String(),
-		serverSeq,
-	)
+	// no context... make a temp one...  TODO(kpfaulkner) change this.
+	ctx := context.Background()
+	row := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE docid = ? AND serverseq = ?", tblChanges, docID.String(), serverSeq)
+	changeInfo, err := readRowIntoChangeInfo(row.Scan)
 	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("docID %s, serverSeq %d: %w",
+				docID.String(),
+				serverSeq,
+				database.ErrDocumentNotFound,
+			)
+		}
 		return nil, fmt.Errorf("fetch change of %s: %w", docID.String(), err)
 	}
-	if raw == nil {
-		return nil, fmt.Errorf(
-			"docID %s, serverSeq %d: %w",
-			docID.String(),
-			serverSeq,
-			database.ErrDocumentNotFound,
-		)
-	}
 
-	changeInfo := raw.(*database.ChangeInfo)
 	actorID, err := time.ActorIDFromHex(changeInfo.ActorID.String())
 	if err != nil {
 		return nil, err
