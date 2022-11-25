@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	gotime "time"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -47,14 +48,73 @@ func New(filename string) (*DB, error) {
 		return nil, fmt.Errorf("new sqlitedb: %w", err)
 	}
 
-	conn, err := db.Conn(context.Background())
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("new sqlitedb: %w", err)
 	}
 
+	// create schema/tables if required
+	createTables(ctx, conn)
+
 	return &DB{
 		conn: conn,
 	}, nil
+}
+
+func createTables(ctx context.Context, conn *sql.Conn) error {
+
+	// changes table
+	_, err := conn.ExecContext(ctx, `create table changes (id varchar(50) primary key, client_id varchar(50), doc_id varchar(50), actor_id, varchar(50),  lamport integer,server_seq integer)`)
+	if err != nil {
+		log.Printf("unable to create changes table: %v", err)
+		return err
+	}
+
+	// clients table
+	_, err = conn.ExecContext(ctx, `create table clients (id varchar(50) primary key, key varchar(50), project_id  varchar(50), status varchar(50),  updated_at DATETIME , created_at DATETIME, documents BLOB)`)
+	if err != nil {
+		log.Printf("unable to create clients table: %v", err)
+		return err
+	}
+
+	// documents table
+	_, err = conn.ExecContext(ctx, `create table documents (id varchar(50) primary key, key varchar(50), project_id  varchar(50), accessed_at DATETIME , created_at DATETIME, owner varchar(50), server_seq INTEGER, updated_at DATETIME)`)
+	if err != nil {
+		log.Printf("unable to create documents table: %v", err)
+		return err
+	}
+
+	// projects table
+	// auth_webhook_methods will be single string, delimited by ';'
+	_, err = conn.ExecContext(ctx, `create table projects (id varchar(50) primary key, name varchar(50), owner varchar(50), public_key varchar(50), secret_key varchar(50), auth_webhook_url varchar(300), auth_webhook_methods varchar(500), created_at DATETIME, updated_at DATETIME)`)
+	if err != nil {
+		log.Printf("unable to create projects table: %v", err)
+		return err
+	}
+
+	// snapshots table
+	_, err = conn.ExecContext(ctx, `create table snapshots (id varchar(50) primary key,  created_at DATETIME,doc_id varchar(50), server_seq INTEGER, lamport INTEGER, snapshot BLOB)`)
+	if err != nil {
+		log.Printf("unable to create snapshots table: %v", err)
+		return err
+	}
+
+	// users table
+	_, err = conn.ExecContext(ctx, `create table users (id varchar(50) primary key, username varchar(50), created_at DATETIME, hashed_password varchar(100))`)
+	if err != nil {
+		log.Printf("unable to create users table: %v", err)
+		return err
+	}
+
+	// syncedseqs table
+	_, err = conn.ExecContext(ctx, `create table syncedseqs (id varchar(50) primary key, doc_id varchar(50), client_id varchar(50), lamport INTEGER, actor_id varchar(50), server_seq INTEGER)`)
+	if err != nil {
+		log.Printf("unable to create syncedseqs table: %v", err)
+		return err
+	}
+
+	return nil
 }
 
 // Close closes the database.
@@ -469,7 +529,7 @@ func (d *DB) ListProjectInfos(
 	defer txn.Rollback()
 
 	var infos []*database.ProjectInfo
-	rows, err := txn.QueryContext(ctx, "SELECT * FROM ? WHERE owner_name = ?", tblProjects, owner.String())
+	rows, err := txn.QueryContext(ctx, "SELECT * FROM ? WHERE owner = ?", tblProjects, owner.String())
 	for rows.Next() {
 		pi, err := readRowIntoProjectInfo(rows.Scan)
 		if err != nil {
