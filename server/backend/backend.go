@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/rs/xid"
+	"github.com/yorkie-team/yorkie/server/backend/database/sqlite"
 
 	"github.com/yorkie-team/yorkie/api/types"
 	"github.com/yorkie-team/yorkie/pkg/cache"
@@ -86,7 +87,11 @@ func New(
 			return nil, err
 		}
 	} else {
-		db, err = memdb.New()
+		_, err = memdb.New()
+		if err != nil {
+			return nil, err
+		}
+		db, err = sqlite.New("test.db")
 		if err != nil {
 			return nil, err
 		}

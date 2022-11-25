@@ -18,6 +18,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	gotime "time"
 
@@ -125,6 +126,35 @@ func readRowIntoProjectInfo(scan func(dest ...any) error) (*database.ProjectInfo
 	return &projectInfo, nil
 }
 
+func readRowIntoClientInfo(scan func(dest ...any) error) (*database.ClientInfo, error) {
+
+	var id types.ID
+	var projectID types.ID
+	var key string
+	var status string
+	var documents map[types.ID]*database.ClientDocInfo
+	var createdAt gotime.Time
+	var updatedAt gotime.Time
+
+	// documents expected to initially blow up. TODO(kpfaulkner)
+	err := scan(&id, &projectID, &key, &status, &documents, &createdAt, &updatedAt)
+	if err != nil {
+		return nil, err
+	}
+
+	clientInfo := database.ClientInfo{
+		ID:        id,
+		ProjectID: projectID,
+		Key:       key,
+		Status:    status,
+		Documents: documents,
+		CreatedAt: createdAt,
+		UpdatedAt: updatedAt,
+	}
+
+	return &clientInfo, nil
+}
+
 func readRowIntoUserInfo(scan func(dest ...any) error) (*database.UserInfo, error) {
 	var id types.ID
 	var username string
@@ -181,7 +211,7 @@ func (d *DB) FindProjectInfoByName(
 	// TODO(kpfaulkner)
 	defer txn.Rollback()
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE owner_name = ? AND name = ?", tblProjects, owner.String(), name)
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE owner = ? AND name = ?", tblProjects, owner.String(), name)
 	projectInfo, err := readRowIntoProjectInfo(rows.Scan)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -250,7 +280,7 @@ func (d *DB) ensureDefaultUserInfo(
 
 	defer txn.Rollback()
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE owner_name = ? AND name = ?", tblUsers, username)
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE owner = ? AND name = ?", tblUsers, username)
 	info, err := readRowIntoUserInfo(rows.Scan)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("find user by username: %w", err)
@@ -325,7 +355,7 @@ func (d *DB) CreateProjectInfo(
 	}
 	defer txn.Rollback()
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE owner_name = ? AND name = ?", tblProjects, owner.String(), name)
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE owner = ? AND name = ?", tblProjects, owner.String(), name)
 	projectInfo, err := readRowIntoProjectInfo(rows.Scan)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("find project by owner and name: %w", err)
@@ -507,18 +537,40 @@ func (d *DB) ListUserInfos(
 	return infos, nil
 }
 
+func updateClientInfo(ctx context.Context, txn *sql.Tx, info *database.ClientInfo) error {
+	// unsure what to do about ClientInfo.Documents. Instead of making separate table and joining, I'm (just for now) going to marshal to JSON and store in DB.
+	bytes, err := json.Marshal(info.Documents)
+	if err != nil {
+		return fmt.Errorf("unable to marshal ClientInfo.Documents: %w", err)
+	}
+
+	_, err = txn.ExecContext(ctx, "UPDATE ? SET projectid=?, key=?, status=?, documents=?, createdat=?,updatedat=? WHERE id=?",
+		tblClients, info.ProjectID, info.Key, info.Status, string(bytes), info.CreatedAt, info.UpdatedAt, info.ID)
+	return err
+}
+
 // ActivateClient activates a client.
 func (d *DB) ActivateClient(
 	ctx context.Context,
 	projectID types.ID,
 	key string,
 ) (*database.ClientInfo, error) {
-	txn := d.db.Txn(true)
-	defer txn.Abort()
 
-	raw, err := txn.First(tblClients, "project_id_key", projectID.String(), key)
+	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
 	if err != nil {
+		return nil, fmt.Errorf("unable to create transaction: %w", err)
+	}
+
+	defer txn.Rollback()
+
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE projectid = ? AND key = ?", tblClients, projectID, key)
+	existingClientInfo, err := readRowIntoClientInfo(rows.Scan)
+
+	noClientExists := false
+	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("find client by project id and key: %w", err)
+	} else if err == sql.ErrNoRows {
+		noClientExists = true
 	}
 
 	now := gotime.Now()
@@ -530,19 +582,18 @@ func (d *DB) ActivateClient(
 		UpdatedAt: now,
 	}
 
-	if raw == nil {
+	if noClientExists {
 		clientInfo.ID = newID()
 		clientInfo.CreatedAt = now
 	} else {
-		loaded := raw.(*database.ClientInfo)
-		clientInfo.ID = loaded.ID
-		clientInfo.CreatedAt = loaded.CreatedAt
+		clientInfo.ID = existingClientInfo.ID
+		clientInfo.CreatedAt = existingClientInfo.CreatedAt
 	}
 
-	if err := txn.Insert(tblClients, clientInfo); err != nil {
+	if _, err := txn.ExecContext(ctx, "INSERT INTO ? ('id', 'projectId', 'key', 'status', 'createdat') VALUES(?, ?, ?, ?,?)", tblClients,
+		clientInfo.ID, clientInfo.ProjectID, clientInfo.Key, clientInfo.Status, clientInfo.CreatedAt); err != nil {
 		return nil, fmt.Errorf("insert client: %w", err)
 	}
-
 	txn.Commit()
 	return clientInfo, nil
 }
@@ -553,29 +604,29 @@ func (d *DB) DeactivateClient(ctx context.Context, projectID, clientID types.ID)
 		return nil, err
 	}
 
-	txn := d.db.Txn(true)
-	defer txn.Abort()
-
-	raw, err := txn.First(tblClients, "id", clientID.String())
+	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
 	if err != nil {
-		return nil, fmt.Errorf("find client by id: %w", err)
+		return nil, fmt.Errorf("unable to create transaction: %w", err)
 	}
 
-	if raw == nil {
+	defer txn.Rollback()
+
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE id = ? ", tblClients, clientID)
+	clientInfo, err := readRowIntoClientInfo(rows.Scan)
+
+	if err != nil && err != sql.ErrNoRows {
+		return nil, fmt.Errorf("find client by id: %w", err)
+	} else if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("%s: %w", clientID, database.ErrClientNotFound)
 	}
 
-	clientInfo := raw.(*database.ClientInfo)
 	if err := clientInfo.CheckIfInProject(projectID); err != nil {
 		return nil, err
 	}
 
-	// NOTE(hackerwins): When retrieving objects from go-memdb, references to
-	// the stored objects are returned instead of new objects. This can cause
-	// problems when directly modifying loaded objects. So, we need to DeepCopy.
 	clientInfo = clientInfo.DeepCopy()
 	clientInfo.Deactivate()
-	if err := txn.Insert(tblClients, clientInfo); err != nil {
+	if err := updateClientInfo(ctx, txn, clientInfo); err != nil {
 		return nil, fmt.Errorf("update client: %w", err)
 	}
 
