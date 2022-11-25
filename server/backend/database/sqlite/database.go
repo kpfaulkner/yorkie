@@ -65,21 +65,21 @@ func New(filename string) (*DB, error) {
 func createTables(ctx context.Context, conn *sql.Conn) error {
 
 	// changes table
-	_, err := conn.ExecContext(ctx, `create table changes (id varchar(50) primary key, client_id varchar(50), doc_id varchar(50), actor_id, varchar(50),  lamport integer,server_seq integer)`)
+	_, err := conn.ExecContext(ctx, `create table if not exists changes (id varchar(50) primary key, client_id varchar(50), doc_id varchar(50), actor_id varchar(50),  lamport integer,server_seq integer)`)
 	if err != nil {
 		log.Printf("unable to create changes table: %v", err)
 		return err
 	}
 
 	// clients table
-	_, err = conn.ExecContext(ctx, `create table clients (id varchar(50) primary key, key varchar(50), project_id  varchar(50), status varchar(50),  updated_at DATETIME , created_at DATETIME, documents BLOB)`)
+	_, err = conn.ExecContext(ctx, `create table if not exists clients (id varchar(50) primary key, key varchar(50), project_id  varchar(50), status varchar(50),  updated_at DATETIME , created_at DATETIME, documents BLOB)`)
 	if err != nil {
 		log.Printf("unable to create clients table: %v", err)
 		return err
 	}
 
 	// documents table
-	_, err = conn.ExecContext(ctx, `create table documents (id varchar(50) primary key, key varchar(50), project_id  varchar(50), accessed_at DATETIME , created_at DATETIME, owner varchar(50), server_seq INTEGER, updated_at DATETIME)`)
+	_, err = conn.ExecContext(ctx, `create table if not exists documents (id varchar(50) primary key, key varchar(50), project_id  varchar(50), accessed_at DATETIME , created_at DATETIME, owner varchar(50), server_seq INTEGER, updated_at DATETIME)`)
 	if err != nil {
 		log.Printf("unable to create documents table: %v", err)
 		return err
@@ -87,21 +87,21 @@ func createTables(ctx context.Context, conn *sql.Conn) error {
 
 	// projects table
 	// auth_webhook_methods will be single string, delimited by ';'
-	_, err = conn.ExecContext(ctx, `create table projects (id varchar(50) primary key, name varchar(50), owner varchar(50), public_key varchar(50), secret_key varchar(50), auth_webhook_url varchar(300), auth_webhook_methods varchar(500), created_at DATETIME, updated_at DATETIME)`)
+	_, err = conn.ExecContext(ctx, `create table if not exists projects (id varchar(50) primary key, name varchar(50), owner varchar(50), public_key varchar(50), secret_key varchar(50), auth_webhook_url varchar(300), auth_webhook_methods varchar(500), created_at DATETIME, updated_at DATETIME)`)
 	if err != nil {
 		log.Printf("unable to create projects table: %v", err)
 		return err
 	}
 
 	// snapshots table
-	_, err = conn.ExecContext(ctx, `create table snapshots (id varchar(50) primary key,  created_at DATETIME,doc_id varchar(50), server_seq INTEGER, lamport INTEGER, snapshot BLOB)`)
+	_, err = conn.ExecContext(ctx, `create table if not exists snapshots (id varchar(50) primary key,  created_at DATETIME,doc_id varchar(50), server_seq INTEGER, lamport INTEGER, snapshot BLOB)`)
 	if err != nil {
 		log.Printf("unable to create snapshots table: %v", err)
 		return err
 	}
 
 	// users table
-	_, err = conn.ExecContext(ctx, `create table users (id varchar(50) primary key, username varchar(50), created_at DATETIME, hashed_password varchar(100))`)
+	_, err = conn.ExecContext(ctx, `create table if not exists users (id varchar(50) primary key, username varchar(50), created_at DATETIME, hashed_password varchar(100))`)
 	if err != nil {
 		log.Printf("unable to create users table: %v", err)
 		return err
