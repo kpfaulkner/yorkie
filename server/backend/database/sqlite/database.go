@@ -126,6 +126,7 @@ func readRowIntoProjectInfo(scan func(dest ...any) error) (*database.ProjectInfo
 	return &projectInfo, nil
 }
 
+// TODO(kpfaulkner) fix documents map!!!
 func readRowIntoClientInfo(scan func(dest ...any) error) (*database.ClientInfo, error) {
 
 	var id types.ID
@@ -640,18 +641,22 @@ func (d *DB) FindClientInfoByID(ctx context.Context, projectID, clientID types.I
 		return nil, err
 	}
 
-	txn := d.db.Txn(false)
-	defer txn.Abort()
-
-	raw, err := txn.First(tblClients, "id", clientID.String())
+	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
 	if err != nil {
-		return nil, fmt.Errorf("find client by id: %w", err)
+		return nil, fmt.Errorf("unable to create transaction: %w", err)
 	}
-	if raw == nil {
+
+	defer txn.Rollback()
+
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE id = ? ", tblClients, clientID)
+	clientInfo, err := readRowIntoClientInfo(rows.Scan)
+
+	if err != nil && err != sql.ErrNoRows {
+		return nil, fmt.Errorf("find client by id: %w", err)
+	} else if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("%s: %w", clientID, database.ErrClientNotFound)
 	}
 
-	clientInfo := raw.(*database.ClientInfo)
 	if err := clientInfo.CheckIfInProject(projectID); err != nil {
 		return nil, err
 	}
@@ -672,18 +677,21 @@ func (d *DB) UpdateClientInfoAfterPushPull(
 		return err
 	}
 
-	txn := d.db.Txn(true)
-	defer txn.Abort()
-
-	raw, err := txn.First(tblClients, "id", clientInfo.ID.String())
+	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
 	if err != nil {
-		return fmt.Errorf("find client by id: %w", err)
+		return fmt.Errorf("unable to create transaction: %w", err)
 	}
-	if raw == nil {
+
+	defer txn.Rollback()
+
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE id = ? ", tblClients, clientInfo.ID)
+	loaded, err := readRowIntoClientInfo(rows.Scan)
+
+	if err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("find client by id: %w", err)
+	} else if err == sql.ErrNoRows {
 		return fmt.Errorf("%s: %w", clientInfo.ID, database.ErrClientNotFound)
 	}
-
-	loaded := raw.(*database.ClientInfo).DeepCopy()
 
 	if !attached {
 		loaded.Documents[docInfo.ID] = &database.ClientDocInfo{
@@ -712,7 +720,7 @@ func (d *DB) UpdateClientInfoAfterPushPull(
 		loaded.UpdatedAt = gotime.Now()
 	}
 
-	if err := txn.Insert(tblClients, loaded); err != nil {
+	if err := updateClientInfo(ctx, txn, loaded); err != nil {
 		return fmt.Errorf("update client: %w", err)
 	}
 	txn.Commit()
@@ -726,24 +734,24 @@ func (d *DB) FindDeactivateCandidates(
 	inactiveThreshold gotime.Duration,
 	candidatesLimit int,
 ) ([]*database.ClientInfo, error) {
-	txn := d.db.Txn(false)
-	defer txn.Abort()
-
-	offset := gotime.Now().Add(-inactiveThreshold)
+	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("unable to create transaction: %w", err)
+	}
+	defer txn.Rollback()
 
 	var infos []*database.ClientInfo
-	iterator, err := txn.ReverseLowerBound(
-		tblClients,
-		"status_updated_at",
-		database.ClientActivated,
-		offset,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("fetch deactivated clients: %w", err)
-	}
 
-	for raw := iterator.Next(); raw != nil; raw = iterator.Next() {
-		info := raw.(*database.ClientInfo)
+	// updatedAt needs to be after offset.
+	offset := gotime.Now().Add(-inactiveThreshold)
+
+	// TODO(kpfaulkner) will need to check sqlite time comparrison.
+	rows, err := txn.QueryContext(ctx, "SELECT * FROM ? WHERE status = ? AND updatedat > ?", tblClients, database.ClientActivated, offset)
+	for rows.Next() {
+		info, err := readRowIntoClientInfo(rows.Scan)
+		if err != nil {
+			return nil, fmt.Errorf("read row into project info: %w", err)
+		}
 
 		if info.Status != database.ClientActivated ||
 			candidatesLimit <= len(infos) ||
@@ -752,6 +760,7 @@ func (d *DB) FindDeactivateCandidates(
 		}
 		infos = append(infos, info)
 	}
+
 	return infos, nil
 }
 
