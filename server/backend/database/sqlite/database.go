@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	gotime "time"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -123,7 +124,8 @@ func (d *DB) Close() error {
 	return nil
 }
 
-// TODO(kpfaulkner) operations will blow up... need to sort that out.
+// operations will be converted to byte array. Converting to JSON is stupid here, but will
+// work as a solution for now.
 func readRowIntoChangeInfo(scan func(dest ...any) error) (*database.ChangeInfo, error) {
 	var id types.ID
 	var docID types.ID
@@ -132,9 +134,15 @@ func readRowIntoChangeInfo(scan func(dest ...any) error) (*database.ChangeInfo, 
 	var lamport int64
 	var actorID types.ID
 	var message string
-	var operations [][]byte
+	var operationsBytes []byte
 
-	err := scan(&id, &docID, &serverSeq, &clientSeq, &lamport, &actorID, &message, &operations)
+	err := scan(&id, &docID, &serverSeq, &clientSeq, &lamport, &actorID, &message, &operationsBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	var operations [][]byte
+	err = json.Unmarshal(operationsBytes, &operations)
 	if err != nil {
 		return nil, err
 	}
@@ -153,6 +161,8 @@ func readRowIntoChangeInfo(scan func(dest ...any) error) (*database.ChangeInfo, 
 	return &changeInfo, nil
 }
 
+// readRowIntoProjectInfo
+// authWebhookMethods will be single string, delimited by ';'
 func readRowIntoProjectInfo(scan func(dest ...any) error) (*database.ProjectInfo, error) {
 	var id types.ID
 	var nameDB string
@@ -160,14 +170,15 @@ func readRowIntoProjectInfo(scan func(dest ...any) error) (*database.ProjectInfo
 	var publicKeyDB string
 	var secretKey string
 	var authWebhoolURL string
-	var authWebhookMethods []string
+	var authWebhookMethodsRaw string
 	var createdAt gotime.Time
 	var updatedAt gotime.Time
 
-	err := scan(&id, &nameDB, &ownerDB, &publicKeyDB, &secretKey, &authWebhoolURL, &authWebhookMethods, &createdAt, &updatedAt)
+	err := scan(&id, &nameDB, &ownerDB, &publicKeyDB, &secretKey, &authWebhoolURL, &authWebhookMethodsRaw, &createdAt, &updatedAt)
 	if err != nil {
 		return nil, err
 	}
+	authWebhookMethods := strings.Split(authWebhookMethodsRaw, ";")
 
 	projectInfo := database.ProjectInfo{
 		ID:                 id,
@@ -184,19 +195,25 @@ func readRowIntoProjectInfo(scan func(dest ...any) error) (*database.ProjectInfo
 	return &projectInfo, nil
 }
 
-// TODO(kpfaulkner) fix documents map!!!
+// does JSON conversion from blob. This is stupid, but will work for now.
 func readRowIntoClientInfo(scan func(dest ...any) error) (*database.ClientInfo, error) {
 
 	var id types.ID
 	var projectID types.ID
 	var key string
 	var status string
-	var documents map[types.ID]*database.ClientDocInfo
+	var documentsBytes []byte
 	var createdAt gotime.Time
 	var updatedAt gotime.Time
 
 	// documents expected to initially blow up. TODO(kpfaulkner)
-	err := scan(&id, &projectID, &key, &status, &documents, &createdAt, &updatedAt)
+	err := scan(&id, &projectID, &key, &status, &documentsBytes, &createdAt, &updatedAt)
+	if err != nil {
+		return nil, err
+	}
+
+	var documents map[types.ID]*database.ClientDocInfo
+	err = json.Unmarshal(documentsBytes, &documents)
 	if err != nil {
 		return nil, err
 	}
