@@ -156,6 +156,36 @@ func readRowIntoClientInfo(scan func(dest ...any) error) (*database.ClientInfo, 
 	return &clientInfo, nil
 }
 
+func readRowIntoDocInfo(scan func(dest ...any) error) (*database.DocInfo, error) {
+
+	var id types.ID
+	var projectID types.ID
+	var key key.Key
+	var serverSeq int64
+	var owner types.ID
+	var createdAt gotime.Time
+	var accessedAt gotime.Time
+	var updatedAt gotime.Time
+
+	err := scan(&id, &projectID, &key, &serverSeq, &owner, &createdAt, &accessedAt, &updatedAt)
+	if err != nil {
+		return nil, err
+	}
+
+	docInfo := database.DocInfo{
+		ID:         id,
+		ProjectID:  projectID,
+		Key:        key,
+		ServerSeq:  serverSeq,
+		Owner:      owner,
+		CreatedAt:  createdAt,
+		AccessedAt: accessedAt,
+		UpdatedAt:  updatedAt,
+	}
+
+	return &docInfo, nil
+}
+
 func readRowIntoUserInfo(scan func(dest ...any) error) (*database.UserInfo, error) {
 	var id types.ID
 	var username string
@@ -774,20 +804,26 @@ func (d *DB) FindDocInfoByKeyAndOwner(
 	key key.Key,
 	createDocIfNotExist bool,
 ) (*database.DocInfo, error) {
-	txn := d.db.Txn(true)
-	defer txn.Abort()
 
-	raw, err := txn.First(tblDocuments, "project_id_key", projectID.String(), key.String())
+	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
 	if err != nil {
-		return nil, fmt.Errorf("find document by key: %w", err)
+		return nil, fmt.Errorf("unable to create transaction: %w", err)
 	}
-	if !createDocIfNotExist && raw == nil {
+
+	defer txn.Rollback()
+
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE projectid = ? AND key = ?", tblDocuments, projectID.String(), key.String())
+	docInfo, err := readRowIntoDocInfo(rows.Scan)
+	if err != nil && err != sql.ErrNoRows {
+		return nil, fmt.Errorf("find document by key: %w", err)
+	} else if err == sql.ErrNoRows && !createDocIfNotExist {
 		return nil, fmt.Errorf("%s: %w", key, database.ErrDocumentNotFound)
 	}
 
+	noDocInfo := err == sql.ErrNoRows
+
 	now := gotime.Now()
-	var docInfo *database.DocInfo
-	if raw == nil {
+	if noDocInfo {
 		docInfo = &database.DocInfo{
 			ID:         newID(),
 			ProjectID:  projectID,
@@ -797,15 +833,15 @@ func (d *DB) FindDocInfoByKeyAndOwner(
 			CreatedAt:  now,
 			AccessedAt: now,
 		}
-		if err := txn.Insert(tblDocuments, docInfo); err != nil {
+
+		if _, err := txn.ExecContext(ctx, "INSERT INTO ? VALUES(?, ?, ?, ?,?, ?, ?, ?)",
+			tblDocuments, docInfo.ID, docInfo.ProjectID, docInfo.Key, docInfo.Owner, docInfo.ServerSeq, docInfo.CreatedAt, docInfo.AccessedAt); err != nil {
 			return nil, fmt.Errorf("create document: %w", err)
 		}
 		txn.Commit()
-	} else {
-		docInfo = raw.(*database.DocInfo)
 	}
 
-	return docInfo.DeepCopy(), nil
+	return docInfo, nil
 }
 
 // FindDocInfoByKey finds the document of the given key.
@@ -814,18 +850,24 @@ func (d *DB) FindDocInfoByKey(
 	projectID types.ID,
 	key key.Key,
 ) (*database.DocInfo, error) {
-	txn := d.db.Txn(false)
-	defer txn.Abort()
 
-	raw, err := txn.First(tblDocuments, "project_id_key", projectID.String(), key.String())
+	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
+		return nil, fmt.Errorf("unable to create transaction: %w", err)
+	}
+
+	defer txn.Rollback()
+
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE projectid = ? AND key = ?", tblDocuments, projectID.String(), key.String())
+	docInfo, err := readRowIntoDocInfo(rows.Scan)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("%s: %w", key, database.ErrDocumentNotFound)
+		}
 		return nil, fmt.Errorf("find document by key: %w", err)
 	}
-	if raw == nil {
-		return nil, fmt.Errorf("%s: %w", key, database.ErrDocumentNotFound)
-	}
 
-	return raw.(*database.DocInfo).DeepCopy(), nil
+	return docInfo, nil
 }
 
 // FindDocInfoByID finds a docInfo of the given ID.
@@ -833,20 +875,24 @@ func (d *DB) FindDocInfoByID(
 	ctx context.Context,
 	id types.ID,
 ) (*database.DocInfo, error) {
-	txn := d.db.Txn(true)
-	defer txn.Abort()
 
-	raw, err := txn.First(tblDocuments, "id", id.String())
+	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return nil, fmt.Errorf("find document by id: %w", err)
+		return nil, fmt.Errorf("unable to create transaction: %w", err)
 	}
 
-	if raw == nil {
-		return nil, fmt.Errorf("%s: %w", id, database.ErrDocumentNotFound)
+	defer txn.Rollback()
+
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE id = ?", tblDocuments, id.String())
+	docInfo, err := readRowIntoDocInfo(rows.Scan)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("%s: %w", id, database.ErrDocumentNotFound)
+		}
+		return nil, fmt.Errorf("find document by key: %w", err)
 	}
 
-	docInfo := raw.(*database.DocInfo)
-	return docInfo.DeepCopy(), nil
+	return docInfo, nil
 }
 
 // CreateChangeInfos stores the given changes and doc info.
@@ -857,8 +903,13 @@ func (d *DB) CreateChangeInfos(
 	initialServerSeq int64,
 	changes []*change.Change,
 ) error {
-	txn := d.db.Txn(true)
-	defer txn.Abort()
+
+	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
+	if err != nil {
+		return fmt.Errorf("unable to create transaction: %w", err)
+	}
+
+	defer txn.Rollback()
 
 	for _, cn := range changes {
 		encodedOperations, err := database.EncodeOperations(cn.Operations())
@@ -866,35 +917,35 @@ func (d *DB) CreateChangeInfos(
 			return err
 		}
 
-		if err := txn.Insert(tblChanges, &database.ChangeInfo{
-			ID:         newID(),
-			DocID:      docInfo.ID,
-			ServerSeq:  cn.ServerSeq(),
-			ActorID:    types.ID(cn.ID().ActorID().String()),
-			ClientSeq:  cn.ClientSeq(),
-			Lamport:    cn.ID().Lamport(),
-			Message:    cn.Message(),
-			Operations: encodedOperations,
-		}); err != nil {
+		// how do we write the encodedOperations? ([][]byte ???) TODO(kpfaulkner) check this!
+		if _, err := txn.ExecContext(ctx, "INSERT INTO ? VALUES(?, ?, ?, ?,?, ?, ?, ?)",
+			tblChanges, newID(), docInfo.ID, cn.ServerSeq(), types.ID(cn.ID().ActorID().String()),
+			cn.ClientSeq(), cn.ID().Lamport(), cn.Message(), encodedOperations); err != nil {
 			return fmt.Errorf("create change: %w", err)
 		}
 	}
 
-	raw, err := txn.First(tblDocuments, "project_id_key", projectID.String(), docInfo.Key.String())
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE projectid = ? AND key = ?", tblDocuments, projectID.String(), docInfo.Key.String())
+	loadedDocInfo, err := readRowIntoDocInfo(rows.Scan)
 	if err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("%s: %w", docInfo.Key, database.ErrDocumentNotFound)
+		}
 		return fmt.Errorf("find document by key: %w", err)
 	}
-	if raw == nil {
-		return fmt.Errorf("%s: %w", docInfo.Key, database.ErrDocumentNotFound)
-	}
-	loadedDocInfo := raw.(*database.DocInfo).DeepCopy()
+
+	/////////
+
 	if loadedDocInfo.ServerSeq != initialServerSeq {
 		return fmt.Errorf("%s: %w", docInfo.ID, database.ErrConflictOnUpdate)
 	}
 
 	loadedDocInfo.ServerSeq = docInfo.ServerSeq
 	loadedDocInfo.UpdatedAt = gotime.Now()
-	if err := txn.Insert(tblDocuments, loadedDocInfo); err != nil {
+
+	if _, err := txn.ExecContext(ctx, "UPDATE ? SET projectid=?, key=?, owner=?, serverseq=?, createdat=?, accessedat=? WHERE id=?",
+		tblDocuments, loadedDocInfo.ProjectID, loadedDocInfo.Key, loadedDocInfo.Owner,
+		loadedDocInfo.ServerSeq, loadedDocInfo.CreatedAt, loadedDocInfo.AccessedAt, loadedDocInfo.ID); err != nil {
 		return fmt.Errorf("update document: %w", err)
 	}
 
