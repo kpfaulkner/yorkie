@@ -452,7 +452,7 @@ func (d *DB) ensureDefaultUserInfo(
 		info = database.NewUserInfo(username, hashedPassword)
 		info.ID = newID()
 
-		if _, err := txn.ExecContext(ctx, "INSERT INTO ? VALUES(?, ?, ?, ?)", tblUsers, info.ID, info.Username, info.HashedPassword, info.CreatedAt); err != nil {
+		if _, err := txn.ExecContext(ctx, "INSERT INTO ? (id, username, hashed_password, created_at) VALUES(?, ?, ?, ?)", tblUsers, info.ID, info.Username, info.HashedPassword, info.CreatedAt); err != nil {
 			return nil, fmt.Errorf("insert user: %w", err)
 		}
 	}
@@ -491,13 +491,14 @@ func (d *DB) ensureDefaultProjectInfo(
 }
 
 func insertProjectInfo(ctx context.Context, txn *sql.Tx, info *database.ProjectInfo) error {
-	_, err := txn.ExecContext(ctx, "INSERT INTO ? VALUES(?,?,?,?,?,?,?,?,?);", tblProjects, info.ID, info.Name,
-		info.Owner, info.PublicKey, info.SecretKey, info.AuthWebhookURL, info.AuthWebhookMethods, info.CreatedAt, info.UpdatedAt)
+	methods := strings.Join(info.AuthWebhookMethods, ";")
+	_, err := txn.ExecContext(ctx, "INSERT INTO ? (id, name, owner, public_key, secret_key, auth_webhook_url, auth_webhook_methods, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?);", tblProjects, info.ID, info.Name,
+		info.Owner, info.PublicKey, info.SecretKey, info.AuthWebhookURL, methods, info.CreatedAt, info.UpdatedAt)
 	return err
 }
 
 func insertUserInfo(ctx context.Context, txn *sql.Tx, info *database.UserInfo) error {
-	_, err := txn.ExecContext(ctx, "INSERT INTO ? VALUES(?,?,?,?);", tblUsers, info.ID, info.Username, info.HashedPassword, info.CreatedAt)
+	_, err := txn.ExecContext(ctx, "INSERT INTO ? (id, username, hashed_password, created_at) VALUES(?,?,?,?);", tblUsers, info.ID, info.Username, info.HashedPassword, info.CreatedAt)
 	return err
 }
 
@@ -703,7 +704,7 @@ func updateClientInfo(ctx context.Context, txn *sql.Tx, info *database.ClientInf
 	}
 
 	_, err = txn.ExecContext(ctx, "UPDATE ? SET projectid=?, key=?, status=?, documents=?, createdat=?,updatedat=? WHERE id=?",
-		tblClients, info.ProjectID, info.Key, info.Status, string(bytes), info.CreatedAt, info.UpdatedAt, info.ID)
+		tblClients, info.ProjectID, info.Key, info.Status, bytes, info.CreatedAt, info.UpdatedAt, info.ID)
 	return err
 }
 
@@ -748,7 +749,7 @@ func (d *DB) ActivateClient(
 		clientInfo.CreatedAt = existingClientInfo.CreatedAt
 	}
 
-	if _, err := txn.ExecContext(ctx, "INSERT INTO ? ('id', 'projectId', 'key', 'status', 'createdat') VALUES(?, ?, ?, ?,?)", tblClients,
+	if _, err := txn.ExecContext(ctx, "INSERT INTO ? (id, project_id, key, status, created_at) VALUES(?, ?, ?, ?,?)", tblClients,
 		clientInfo.ID, clientInfo.ProjectID, clientInfo.Key, clientInfo.Status, clientInfo.CreatedAt); err != nil {
 		return nil, fmt.Errorf("insert client: %w", err)
 	}
@@ -961,7 +962,7 @@ func (d *DB) FindDocInfoByKeyAndOwner(
 			AccessedAt: now,
 		}
 
-		if _, err := txn.ExecContext(ctx, "INSERT INTO ? VALUES(?, ?, ?, ?,?, ?, ?, ?)",
+		if _, err := txn.ExecContext(ctx, "INSERT INTO ? (id, project_id, key, owner, server_seq, created_at, accessed_at) VALUES(?, ?, ?, ?,?, ?, ?, ?)",
 			tblDocuments, docInfo.ID, docInfo.ProjectID, docInfo.Key, docInfo.Owner, docInfo.ServerSeq, docInfo.CreatedAt, docInfo.AccessedAt); err != nil {
 			return nil, fmt.Errorf("create document: %w", err)
 		}
@@ -1044,10 +1045,14 @@ func (d *DB) CreateChangeInfos(
 			return err
 		}
 
-		// how do we write the encodedOperations? ([][]byte ???) TODO(kpfaulkner) check this!
-		if _, err := txn.ExecContext(ctx, "INSERT INTO ? VALUES(?, ?, ?, ?,?, ?, ?, ?)",
-			tblChanges, newID(), docInfo.ID, cn.ServerSeq(), types.ID(cn.ID().ActorID().String()),
-			cn.ClientSeq(), cn.ID().Lamport(), cn.Message(), encodedOperations); err != nil {
+		encodedOperationsBytes, err := json.Marshal(encodedOperations)
+		if err != nil {
+			return fmt.Errorf("unable to marshal encodedOperations : %w", err)
+		}
+
+		if _, err := txn.ExecContext(ctx, "INSERT INTO ? (id, doc_id, server_seq,client_seq, lamport, actor_id, message, operations)  VALUES(?, ?, ?, ?,?, ?, ?, ?)",
+			tblChanges, newID(), docInfo.ID, cn.ServerSeq(), cn.ClientSeq(), cn.ID().Lamport(), types.ID(cn.ID().ActorID().String()),
+			cn.Message(), encodedOperationsBytes); err != nil {
 			return fmt.Errorf("create change: %w", err)
 		}
 	}
@@ -1215,9 +1220,9 @@ func (d *DB) CreateSnapshotInfo(
 
 	defer txn.Rollback()
 
-	if _, err := txn.ExecContext(ctx, "INSERT INTO ? VALUES(?, ?, ?,?,?, ?)",
-		tblSnapshots, newID(), docID, doc.Checkpoint().ServerSeq, doc.Lamport(),
-		snapshot, gotime.Now()); err != nil {
+	if _, err := txn.ExecContext(ctx, "INSERT INTO ? (id, created_at, doc_id, server_seq, lamport, snapshot) VALUES(?, ?, ?,?,?, ?)",
+		tblSnapshots, newID(), gotime.Now(), docID, doc.Checkpoint().ServerSeq, doc.Lamport(),
+		snapshot); err != nil {
 		return fmt.Errorf("create snapshot: %w", err)
 	}
 
@@ -1400,7 +1405,7 @@ func (d *DB) UpdateSyncedSeq(
 	if noRows {
 		// insert
 		syncedSeqInfo.ID = newID()
-		if _, err := txn.ExecContext(ctx, "INSERT INTO ? VALUES(?, ?, ?, ?,?, ?, ?, ?)",
+		if _, err := txn.ExecContext(ctx, "INSERT INTO ? ( id, doc_id, client_id, lamport, actor_id, server_seq) VALUES(?,?,?,?,?,?)",
 			tblSyncedSeqs, syncedSeqInfo.ID, syncedSeqInfo.DocID, syncedSeqInfo.ClientID, syncedSeqInfo.Lamport, syncedSeqInfo.ActorID, syncedSeqInfo.ServerSeq); err != nil {
 			return fmt.Errorf("insert syncedseqs of %s: %w", docID.String(), err)
 		}
