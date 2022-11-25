@@ -64,37 +64,6 @@ func (d *DB) Close() error {
 	return nil
 }
 
-func XXXreadRowIntoProjectInfo(row *sql.Row) (*database.ProjectInfo, error) {
-	var id types.ID
-	var nameDB string
-	var ownerDB types.ID
-	var publicKeyDB string
-	var secretKey string
-	var authWebhoolURL string
-	var authWebhookMethods []string
-	var createdAt gotime.Time
-	var updatedAt gotime.Time
-
-	err := row.Scan(&id, &nameDB, &ownerDB, &publicKeyDB, &secretKey, &authWebhoolURL, &authWebhookMethods, &createdAt, &updatedAt)
-	if err != nil {
-		return nil, err
-	}
-
-	projectInfo := database.ProjectInfo{
-		ID:                 id,
-		Name:               nameDB,
-		Owner:              ownerDB,
-		PublicKey:          publicKeyDB,
-		SecretKey:          secretKey,
-		AuthWebhookURL:     authWebhoolURL,
-		AuthWebhookMethods: authWebhookMethods,
-		CreatedAt:          createdAt,
-		UpdatedAt:          updatedAt,
-	}
-
-	return &projectInfo, nil
-}
-
 // TODO(kpfaulkner) operations will blow up... need to sort that out.
 func readRowIntoChangeInfo(scan func(dest ...any) error) (*database.ChangeInfo, error) {
 	var id types.ID
@@ -184,6 +153,32 @@ func readRowIntoClientInfo(scan func(dest ...any) error) (*database.ClientInfo, 
 	}
 
 	return &clientInfo, nil
+}
+
+func readRowIntoSnapshotInfo(scan func(dest ...any) error) (*database.SnapshotInfo, error) {
+
+	var id types.ID
+	var docID types.ID
+	var serverSeq int64
+	var lamport int64
+	var snapshot []byte
+	var createdAt gotime.Time
+
+	err := scan(&id, &docID, &serverSeq, &lamport, &snapshot, &createdAt)
+	if err != nil {
+		return nil, err
+	}
+
+	snapshotInfo := database.SnapshotInfo{
+		ID:        id,
+		DocID:     docID,
+		ServerSeq: serverSeq,
+		Lamport:   lamport,
+		Snapshot:  snapshot,
+		CreatedAt: createdAt,
+	}
+
+	return &snapshotInfo, nil
 }
 
 func readRowIntoSyncedSeqInfo(scan func(dest ...any) error) (*database.SyncedSeqInfo, error) {
@@ -1126,6 +1121,7 @@ func (d *DB) FindChangeInfosBetweenServerSeqs(
 }
 
 // CreateSnapshotInfo stores the snapshot of the given document.
+// figure out storing byte array. Blob column or base64 it?
 func (d *DB) CreateSnapshotInfo(
 	ctx context.Context,
 	docID types.ID,
@@ -1136,19 +1132,19 @@ func (d *DB) CreateSnapshotInfo(
 		return err
 	}
 
-	txn := d.db.Txn(true)
-	defer txn.Abort()
+	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
+	if err != nil {
+		return fmt.Errorf("unable to create transaction: %w", err)
+	}
 
-	if err := txn.Insert(tblSnapshots, &database.SnapshotInfo{
-		ID:        newID(),
-		DocID:     docID,
-		ServerSeq: doc.Checkpoint().ServerSeq,
-		Lamport:   doc.Lamport(),
-		Snapshot:  snapshot,
-		CreatedAt: gotime.Now(),
-	}); err != nil {
+	defer txn.Rollback()
+
+	if _, err := txn.ExecContext(ctx, "INSERT INTO ? VALUES(?, ?, ?,?,?, ?)",
+		tblSnapshots, newID(), docID, doc.Checkpoint().ServerSeq, doc.Lamport(),
+		snapshot, gotime.Now()); err != nil {
 		return fmt.Errorf("create snapshot: %w", err)
 	}
+
 	txn.Commit()
 	return nil
 }
@@ -1159,22 +1155,27 @@ func (d *DB) FindClosestSnapshotInfo(
 	docID types.ID,
 	serverSeq int64,
 ) (*database.SnapshotInfo, error) {
-	txn := d.db.Txn(false)
-	defer txn.Abort()
 
-	iterator, err := txn.ReverseLowerBound(
-		tblSnapshots,
-		"doc_id_server_seq",
-		docID.String(),
-		serverSeq,
-	)
+	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return nil, fmt.Errorf("fetch snapshots before %d: %w", serverSeq, err)
+		return nil, fmt.Errorf("unable to create transaction: %w", err)
+	}
+
+	defer txn.Rollback()
+	changesRows, err := txn.QueryContext(ctx, "SELECT * FROM ? WHERE docid= ? AND serverseq >= ?  ?", tblSnapshots, docID, serverSeq)
+	if err != nil && err != sql.ErrNoRows {
+		return nil, fmt.Errorf("fetch syncedseqs: %w", err)
 	}
 
 	var snapshotInfo *database.SnapshotInfo
-	for raw := iterator.Next(); raw != nil; raw = iterator.Next() {
-		info := raw.(*database.SnapshotInfo)
+	for changesRows.Next() {
+		info, err := readRowIntoSnapshotInfo(changesRows.Scan)
+		if err != nil && err != sql.ErrNoRows {
+			return nil, fmt.Errorf("fetch snapshots before %d: %w", serverSeq, err)
+		} else if err == sql.ErrNoRows {
+			return &database.SnapshotInfo{}, nil
+		}
+
 		if info.DocID == docID {
 			snapshotInfo = info
 			break
