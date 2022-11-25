@@ -65,7 +65,7 @@ func New(filename string) (*DB, error) {
 func createTables(ctx context.Context, conn *sql.Conn) error {
 
 	// changes table
-	_, err := conn.ExecContext(ctx, `create table if not exists changes (id varchar(50) primary key, client_id varchar(50), doc_id varchar(50), actor_id varchar(50),  lamport integer,server_seq integer)`)
+	_, err := conn.ExecContext(ctx, `create table if not exists changes (id varchar(50) primary key, doc_id varchar(50), server_seq integer, client_seq INTEGER, lamport INTEGER, actor_id varchar(50), message varchar(10000), operations BLOB)`)
 	if err != nil {
 		log.Printf("unable to create changes table: %v", err)
 		return err
