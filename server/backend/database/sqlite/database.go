@@ -569,7 +569,7 @@ func (d *DB) ListProjectInfos(
 	defer txn.Rollback()
 
 	var infos []*database.ProjectInfo
-	rows, err := txn.QueryContext(ctx, "SELECT id, name, owners, public_key, secret_key, auth_webhook_url, auth_webhook_methods, created_at, updated_at FROM projects WHERE owner = ?", owner.String())
+	rows, err := txn.QueryContext(ctx, "SELECT id, name, owner, public_key, secret_key, auth_webhook_url, auth_webhook_methods, created_at, updated_at FROM projects WHERE owner = ?", owner.String())
 	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("find project by owner: %w", err)
 	}
