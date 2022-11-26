@@ -73,14 +73,14 @@ func createTables(ctx context.Context, conn *sql.Conn) error {
 	}
 
 	// clients table
-	_, err = conn.ExecContext(ctx, `create table if not exists clients (id varchar(50) primary key, key varchar(50), project_id  varchar(50), status varchar(50),  updated_at DATETIME , created_at DATETIME, documents BLOB)`)
+	_, err = conn.ExecContext(ctx, `create table if not exists clients (id varchar(50) primary key, key varchar(50), project_id  varchar(50), status varchar(50),  updated_at DATETIME default CURRENT_DATE, created_at DATETIME default CURRENT_DATE, documents BLOB)`)
 	if err != nil {
 		log.Printf("unable to create clients table: %v", err)
 		return err
 	}
 
 	// documents table
-	_, err = conn.ExecContext(ctx, `create table if not exists documents (id varchar(50) primary key, key varchar(50), project_id  varchar(50), accessed_at DATETIME , created_at DATETIME, owner varchar(50), server_seq INTEGER, updated_at DATETIME)`)
+	_, err = conn.ExecContext(ctx, `create table if not exists documents (id varchar(50) primary key, key varchar(50), project_id  varchar(50), accessed_at DATETIME default CURRENT_DATE, created_at DATETIME default CURRENT_DATE, owner varchar(50), server_seq INTEGER, updated_at DATETIME default CURRENT_DATE)`)
 	if err != nil {
 		log.Printf("unable to create documents table: %v", err)
 		return err
@@ -88,7 +88,7 @@ func createTables(ctx context.Context, conn *sql.Conn) error {
 
 	// projects table
 	// auth_webhook_methods will be single string, delimited by ';'
-	_, err = conn.ExecContext(ctx, `create table if not exists projects (id varchar(50) primary key, name varchar(50), owner varchar(50), public_key varchar(50), secret_key varchar(50), auth_webhook_url varchar(300), auth_webhook_methods varchar(500), created_at DATETIME, updated_at DATETIME)`)
+	_, err = conn.ExecContext(ctx, `create table if not exists projects (id varchar(50) primary key, name varchar(50), owner varchar(50), public_key varchar(50), secret_key varchar(50), auth_webhook_url varchar(300), auth_webhook_methods varchar(500), created_at DATETIME default CURRENT_DATE, updated_at DATETIME default CURRENT_DATE)`)
 	if err != nil {
 		log.Printf("unable to create projects table: %v", err)
 		return err
@@ -102,7 +102,7 @@ func createTables(ctx context.Context, conn *sql.Conn) error {
 	}
 
 	// users table
-	_, err = conn.ExecContext(ctx, `create table if not exists users (id varchar(50) primary key, username varchar(50), created_at DATETIME, hashed_password varchar(100))`)
+	_, err = conn.ExecContext(ctx, `create table if not exists users (id varchar(50) primary key, username varchar(50), created_at DATETIME default CURRENT_DATE, hashed_password varchar(100))`)
 	if err != nil {
 		log.Printf("unable to create users table: %v", err)
 		return err
@@ -169,12 +169,12 @@ func readRowIntoProjectInfo(scan func(dest ...any) error) (*database.ProjectInfo
 	var ownerDB types.ID
 	var publicKeyDB string
 	var secretKey string
-	var authWebhoolURL string
+	var authWebhookURL string
 	var authWebhookMethodsRaw string
 	var createdAt gotime.Time
 	var updatedAt gotime.Time
 
-	err := scan(&id, &nameDB, &ownerDB, &publicKeyDB, &secretKey, &authWebhoolURL, &authWebhookMethodsRaw, &createdAt, &updatedAt)
+	err := scan(&id, &nameDB, &ownerDB, &publicKeyDB, &secretKey, &authWebhookURL, &authWebhookMethodsRaw, &createdAt, &updatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -186,7 +186,7 @@ func readRowIntoProjectInfo(scan func(dest ...any) error) (*database.ProjectInfo
 		Owner:              ownerDB,
 		PublicKey:          publicKeyDB,
 		SecretKey:          secretKey,
-		AuthWebhookURL:     authWebhoolURL,
+		AuthWebhookURL:     authWebhookURL,
 		AuthWebhookMethods: authWebhookMethods,
 		CreatedAt:          createdAt,
 		UpdatedAt:          updatedAt,
@@ -213,9 +213,14 @@ func readRowIntoClientInfo(scan func(dest ...any) error) (*database.ClientInfo, 
 	}
 
 	var documents map[types.ID]*database.ClientDocInfo
-	err = json.Unmarshal(documentsBytes, &documents)
-	if err != nil {
-		return nil, err
+
+	if documentsBytes != nil && len(documentsBytes) > 0 {
+		err = json.Unmarshal(documentsBytes, &documents)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		documents = make(map[types.ID]*database.ClientDocInfo)
 	}
 
 	clientInfo := database.ClientInfo{
@@ -348,7 +353,8 @@ func (d *DB) FindProjectInfoByPublicKey(
 	}
 
 	defer txn.Rollback()
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM projects WHERE public_key = ?", publicKey)
+
+	rows := txn.QueryRowContext(ctx, "SELECT id, name, owner, public_key, secret_key, auth_webhook_url, auth_webhook_methods, created_at, updated_at FROM projects WHERE public_key = ?", publicKey)
 	projectInfo, err := readRowIntoProjectInfo(rows.Scan)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", publicKey, database.ErrProjectNotFound)
@@ -376,7 +382,7 @@ func (d *DB) FindProjectInfoByName(
 	// TODO(kpfaulkner)
 	defer txn.Rollback()
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM projects WHERE owner = ? AND name = ?", owner.String(), name)
+	rows := txn.QueryRowContext(ctx, "SELECT id, name, owner, public_key, secret_key, auth_webhook_url, auth_webhook_methods, created_at, updated_at FROM projects WHERE owner = ? AND name = ?", owner.String(), name)
 	projectInfo, err := readRowIntoProjectInfo(rows.Scan)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -403,7 +409,7 @@ func (d *DB) FindProjectInfoByID(ctx context.Context, id types.ID) (*database.Pr
 	// TODO(kpfaulkner)
 	defer txn.Rollback()
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM projects WHERE id = ?", id)
+	rows := txn.QueryRowContext(ctx, "SELECT id, name, owner, public_key, secret_key, auth_webhook_url, auth_webhook_methods, created_at, updated_at FROM projects WHERE id = ?", id)
 
 	projectInfo, err := readRowIntoProjectInfo(rows.Scan)
 	if err != nil {
@@ -487,8 +493,7 @@ func (d *DB) ensureDefaultProjectInfo(
 	}
 
 	defer txn.Rollback()
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM projects WHERE id = ?", database.DefaultProjectID.String())
-
+	rows := txn.QueryRowContext(ctx, "SELECT id, name, owner, public_key, secret_key, auth_webhook_url, auth_webhook_methods, created_at, updated_at FROM projects WHERE id = ?", database.DefaultProjectID.String())
 	info, err := readRowIntoProjectInfo(rows.Scan)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("find default project: %w", err)
@@ -514,7 +519,7 @@ func insertProjectInfo(ctx context.Context, txn *sql.Tx, info *database.ProjectI
 }
 
 func insertUserInfo(ctx context.Context, txn *sql.Tx, info *database.UserInfo) error {
-	_, err := txn.ExecContext(ctx, "INSERT INTO ? (id, username, hashed_password, created_at) VALUES(?,?,?,?);", tblUsers, info.ID, info.Username, info.HashedPassword, info.CreatedAt)
+	_, err := txn.ExecContext(ctx, "INSERT INTO users (id, username, hashed_password, created_at) VALUES(?,?,?,?);", info.ID, info.Username, info.HashedPassword, info.CreatedAt)
 	return err
 }
 
@@ -533,7 +538,7 @@ func (d *DB) CreateProjectInfo(
 	}
 	defer txn.Rollback()
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM tables WHERE owner = ? AND name = ?", owner.String(), name)
+	rows := txn.QueryRowContext(ctx, "SELECT id, name, owner, public_key, secret_key, auth_webhook_url, auth_webhook_methods, created_at, updated_at FROM projects WHERE owner = ? AND name = ?", owner.String(), name)
 	projectInfo, err := readRowIntoProjectInfo(rows.Scan)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("find project by owner and name: %w", err)
@@ -606,7 +611,7 @@ func (d *DB) UpdateProjectInfo(
 
 	defer txn.Rollback()
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM projects WHERE id = ?", tblProjects, id)
+	rows := txn.QueryRowContext(ctx, "SELECT id, name, owner, public_key, secret_key, auth_webhook_url, auth_webhook_methods, created_at, updated_at FROM projects WHERE id = ?", tblProjects, id)
 	projectInfo, err := readRowIntoProjectInfo(rows.Scan)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -634,7 +639,7 @@ func (d *DB) UpdateProjectInfo(
 	info.UpdatedAt = gotime.Now()
 
 	// update... we KNOW it already exists (checks above).
-	if _, err := txn.ExecContext(ctx, "UPDATE ? SET name=?,authwebhook=?, authwebhookmethods=?, updatedat=? where id=?;", tblProjects, info.Name,
+	if _, err := txn.ExecContext(ctx, "UPDATE projects SET name=?,authwebhook=?, authwebhookmethods=?, updatedat=? where id=?;", info.Name,
 		info.AuthWebhookURL, info.AuthWebhookMethods, info.UpdatedAt, info.ID); err != nil {
 		return nil, fmt.Errorf("update project: %w", err)
 	}
@@ -657,7 +662,7 @@ func (d *DB) CreateUserInfo(
 	}
 	defer txn.Rollback()
 
-	row := txn.QueryRowContext(ctx, "SELECT * FROM users WHERE username = ?", tblUsers, username)
+	row := txn.QueryRowContext(ctx, "SELECT id, username, hashed_password, created_at FROM users WHERE username = ?", tblUsers, username)
 	userInfo, err := readRowIntoUserInfo(row.Scan)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("find username: %w", err)
@@ -719,7 +724,7 @@ func (d *DB) ListUserInfos(
 	defer txn.Rollback()
 
 	var infos []*database.UserInfo
-	rows, err := txn.QueryContext(ctx, "SELECT * FROM users")
+	rows, err := txn.QueryContext(ctx, "SELECT id, username, hashed_password, created_at FROM users")
 	if err != nil {
 		return nil, fmt.Errorf("fetch users: %w", err)
 	}
@@ -742,8 +747,8 @@ func updateClientInfo(ctx context.Context, txn *sql.Tx, info *database.ClientInf
 		return fmt.Errorf("unable to marshal ClientInfo.Documents: %w", err)
 	}
 
-	_, err = txn.ExecContext(ctx, "UPDATE ? SET projectid=?, key=?, status=?, documents=?, createdat=?,updatedat=? WHERE id=?",
-		tblClients, info.ProjectID, info.Key, info.Status, bytes, info.CreatedAt, info.UpdatedAt, info.ID)
+	_, err = txn.ExecContext(ctx, "UPDATE clients SET project_id=?, key=?, status=?, documents=?, created_at=?,updated_at=? WHERE id=?",
+		info.ProjectID, info.Key, info.Status, bytes, info.CreatedAt, info.UpdatedAt, info.ID)
 	return err
 }
 
@@ -753,7 +758,7 @@ func (d *DB) ActivateClient(
 	projectID types.ID,
 	key string,
 ) (*database.ClientInfo, error) {
-	log.Printf("ActivateClient\n")
+	fmt.Printf("ActivateClient\n")
 	// cant keep creating transactions in passed context... then we'll get transactions in transactions errors.
 	ctx = context.Background()
 	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
@@ -763,7 +768,7 @@ func (d *DB) ActivateClient(
 
 	defer txn.Rollback()
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM clients WHERE projectid = ? AND key = ?", projectID, key)
+	rows := txn.QueryRowContext(ctx, "SELECT id, project_id, key, status, documents, created_at, updated_at FROM clients WHERE project_id = ? AND key = ?", projectID, key)
 	existingClientInfo, err := readRowIntoClientInfo(rows.Scan)
 
 	noClientExists := false
@@ -790,7 +795,7 @@ func (d *DB) ActivateClient(
 		clientInfo.CreatedAt = existingClientInfo.CreatedAt
 	}
 
-	if _, err := txn.ExecContext(ctx, "INSERT INTO ? (id, project_id, key, status, created_at) VALUES(?, ?, ?, ?,?)", tblClients,
+	if _, err := txn.ExecContext(ctx, "INSERT INTO clients (id, project_id, key, status, created_at) VALUES(?, ?, ?, ?,?)",
 		clientInfo.ID, clientInfo.ProjectID, clientInfo.Key, clientInfo.Status, clientInfo.CreatedAt); err != nil {
 		return nil, fmt.Errorf("insert client: %w", err)
 	}
@@ -814,7 +819,7 @@ func (d *DB) DeactivateClient(ctx context.Context, projectID, clientID types.ID)
 
 	defer txn.Rollback()
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM clients WHERE id = ? ", clientID)
+	rows := txn.QueryRowContext(ctx, "SELECT id, project_id, key, status, documents, created_at,updated_at FROM clients WHERE id = ? ", clientID)
 	clientInfo, err := readRowIntoClientInfo(rows.Scan)
 
 	if err != nil && err != sql.ErrNoRows {
@@ -853,7 +858,7 @@ func (d *DB) FindClientInfoByID(ctx context.Context, projectID, clientID types.I
 
 	defer txn.Rollback()
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM clients WHERE id = ? ", clientID)
+	rows := txn.QueryRowContext(ctx, "SELECT id, project_id, key, status, documents, created_at, updated_at FROM clients WHERE id = ? ", clientID)
 	clientInfo, err := readRowIntoClientInfo(rows.Scan)
 
 	if err != nil && err != sql.ErrNoRows {
@@ -892,7 +897,7 @@ func (d *DB) UpdateClientInfoAfterPushPull(
 
 	defer txn.Rollback()
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM clients WHERE id = ? ", clientInfo.ID)
+	rows := txn.QueryRowContext(ctx, "SELECT id,project_id, key, status, documents, created_at, updated_at FROM clients WHERE id = ? ", clientInfo.ID)
 	loaded, err := readRowIntoClientInfo(rows.Scan)
 
 	if err != nil && err != sql.ErrNoRows {
@@ -959,8 +964,7 @@ func (d *DB) FindDeactivateCandidates(
 	offset := gotime.Now().Add(-inactiveThreshold)
 
 	// TODO(kpfaulkner) will need to check sqlite time comparrison.
-	rows, err := txn.QueryContext(ctx, "SELECT * FROM clients WHERE status = ? AND updated_at >  datetime(?, 'unixepoch')", database.ClientActivated, offset)
-	//rows, err := txn.QueryContext(ctx, "SELECT * FROM clients WHERE status = '?' ", database.ClientActivated)
+	rows, err := txn.QueryContext(ctx, "SELECT id, project_id, key, status, documents, created_at,updated_at FROM clients WHERE status = ? AND updated_at >  datetime(?, 'unixepoch')", database.ClientActivated, offset)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			// no rows... just return nil?
@@ -1007,7 +1011,7 @@ func (d *DB) FindDocInfoByKeyAndOwner(
 
 	defer txn.Rollback()
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM documents WHERE projectid = ? AND key = ?", projectID.String(), key.String())
+	rows := txn.QueryRowContext(ctx, "SELECT id,project_id,key,server_seq,owner, created_at, accessed_at, updated_at FROM documents WHERE project_id = ? AND key = ?", projectID.String(), key.String())
 	docInfo, err := readRowIntoDocInfo(rows.Scan)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("find document by key: %w", err)
@@ -1029,8 +1033,8 @@ func (d *DB) FindDocInfoByKeyAndOwner(
 			AccessedAt: now,
 		}
 
-		if _, err := txn.ExecContext(ctx, "INSERT INTO ? (id, project_id, key, owner, server_seq, created_at, accessed_at) VALUES(?, ?, ?, ?,?, ?, ?, ?)",
-			tblDocuments, docInfo.ID, docInfo.ProjectID, docInfo.Key, docInfo.Owner, docInfo.ServerSeq, docInfo.CreatedAt, docInfo.AccessedAt); err != nil {
+		if _, err := txn.ExecContext(ctx, "INSERT INTO documents (id, project_id, key, owner, server_seq, created_at, accessed_at) VALUES(?, ?, ?, ?,?, ?, ?)",
+			docInfo.ID, docInfo.ProjectID, docInfo.Key, docInfo.Owner, docInfo.ServerSeq, docInfo.CreatedAt, docInfo.AccessedAt); err != nil {
 			return nil, fmt.Errorf("create document: %w", err)
 		}
 		txn.Commit()
@@ -1055,7 +1059,7 @@ func (d *DB) FindDocInfoByKey(
 
 	defer txn.Rollback()
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM documents WHERE projectid = ? AND key = ?", projectID.String(), key.String())
+	rows := txn.QueryRowContext(ctx, "SELECT id, project_id, key,server_seq, owner, created_at, accessed_at, updated_at FROM documents WHERE project_id = ? AND key = ?", projectID.String(), key.String())
 	docInfo, err := readRowIntoDocInfo(rows.Scan)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -1082,7 +1086,7 @@ func (d *DB) FindDocInfoByID(
 
 	defer txn.Rollback()
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM documents WHERE id = ?", id.String())
+	rows := txn.QueryRowContext(ctx, "SELECT id,project_id,key,server_seq,owner, created_at, accessed_at, updated_at FROM documents WHERE id = ?", id.String())
 	docInfo, err := readRowIntoDocInfo(rows.Scan)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -1123,14 +1127,14 @@ func (d *DB) CreateChangeInfos(
 			return fmt.Errorf("unable to marshal encodedOperations : %w", err)
 		}
 
-		if _, err := txn.ExecContext(ctx, "INSERT INTO ? (id, doc_id, server_seq,client_seq, lamport, actor_id, message, operations)  VALUES(?, ?, ?, ?,?, ?, ?, ?)",
-			tblChanges, newID(), docInfo.ID, cn.ServerSeq(), cn.ClientSeq(), cn.ID().Lamport(), types.ID(cn.ID().ActorID().String()),
+		if _, err := txn.ExecContext(ctx, "INSERT INTO changes (id, doc_id, server_seq,client_seq, lamport, actor_id, message, operations)  VALUES(?, ?, ?, ?,?, ?, ?, ?)",
+			newID(), docInfo.ID, cn.ServerSeq(), cn.ClientSeq(), cn.ID().Lamport(), types.ID(cn.ID().ActorID().String()),
 			cn.Message(), encodedOperationsBytes); err != nil {
 			return fmt.Errorf("create change: %w", err)
 		}
 	}
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM documents WHERE projectid = ? AND key = ?", projectID.String(), docInfo.Key.String())
+	rows := txn.QueryRowContext(ctx, "SELECT id,project_id,key,server_seq,owner, created_at, accessed_at, updated_at FROM documents WHERE project_id = ? AND key = ?", projectID.String(), docInfo.Key.String())
 	loadedDocInfo, err := readRowIntoDocInfo(rows.Scan)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -1146,7 +1150,7 @@ func (d *DB) CreateChangeInfos(
 	loadedDocInfo.ServerSeq = docInfo.ServerSeq
 	loadedDocInfo.UpdatedAt = gotime.Now()
 
-	if _, err := txn.ExecContext(ctx, "UPDATE ? SET projectid=?, key=?, owner=?, serverseq=?, createdat=?, accessedat=? WHERE id=?",
+	if _, err := txn.ExecContext(ctx, "UPDATE documents SET project_id=?, key=?, owner=?, server_seq=?, created_at=?, accessed_at=? WHERE id=?",
 		tblDocuments, loadedDocInfo.ProjectID, loadedDocInfo.Key, loadedDocInfo.Owner,
 		loadedDocInfo.ServerSeq, loadedDocInfo.CreatedAt, loadedDocInfo.AccessedAt, loadedDocInfo.ID); err != nil {
 		return fmt.Errorf("update document: %w", err)
@@ -1175,7 +1179,7 @@ func (d *DB) PurgeStaleChanges(
 
 	// We want the smallest syncedseqs for a given docID
 	// Logic a bit different to memdb.. TODO(kpfaulkner) go over this again.
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM syncedseqs WHERE docid = ? ORDER BY serverseq ASC", docID)
+	rows := txn.QueryRowContext(ctx, "SELECT id, doc_id, client_id, lamport, actor_id FROM syncedseqs WHERE doc_id = ? ORDER BY server_seq ASC", docID)
 	info, err := readRowIntoSyncedSeqInfo(rows.Scan)
 	if err != nil && err != sql.ErrNoRows {
 		return fmt.Errorf("fetch syncedseqs: %w", err)
@@ -1189,7 +1193,7 @@ func (d *DB) PurgeStaleChanges(
 		return nil
 	}
 
-	changesRows, err := txn.QueryContext(ctx, "SELECT * FROM changes WHERE docid= ? AND serverseq <= ?", docID, minSyncedServerSeq)
+	changesRows, err := txn.QueryContext(ctx, "SELECT id,doc_id,server_seq,client_seq,lamport, actor_id, message, operations FROM changes WHERE doc_id= ? AND server_seq <= ?", docID, minSyncedServerSeq)
 	if err != nil && err != sql.ErrNoRows {
 		return fmt.Errorf("fetch syncedseqs: %w", err)
 	}
@@ -1256,7 +1260,7 @@ func (d *DB) FindChangeInfosBetweenServerSeqs(
 
 	var infos []*database.ChangeInfo
 
-	changesRows, err := txn.QueryContext(ctx, "SELECT * FROM changes WHERE docid= ? AND serverseq >= ? AND serverseq < ?", docID, from, to)
+	changesRows, err := txn.QueryContext(ctx, "SELECT id,doc_id,server_seq,client_seq,lamport, actor_id, message, operations FROM changes WHERE doc_id= ? AND server_seq >= ? AND server_seq < ?", docID, from, to)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("fetch syncedseqs: %w", err)
 	}
@@ -1302,8 +1306,8 @@ func (d *DB) CreateSnapshotInfo(
 
 	defer txn.Rollback()
 
-	if _, err := txn.ExecContext(ctx, "INSERT INTO ? (id, created_at, doc_id, server_seq, lamport, snapshot) VALUES(?, ?, ?,?,?, ?)",
-		tblSnapshots, newID(), gotime.Now(), docID, doc.Checkpoint().ServerSeq, doc.Lamport(),
+	if _, err := txn.ExecContext(ctx, "INSERT INTO snapshots (id, created_at, doc_id, server_seq, lamport, snapshot) VALUES(?, ?, ?,?,?, ?)",
+		newID(), gotime.Now(), docID, doc.Checkpoint().ServerSeq, doc.Lamport(),
 		snapshot); err != nil {
 		return fmt.Errorf("create snapshot: %w", err)
 	}
@@ -1327,7 +1331,7 @@ func (d *DB) FindClosestSnapshotInfo(
 	}
 
 	defer txn.Rollback()
-	changesRows, err := txn.QueryContext(ctx, "SELECT * FROM snapshots WHERE docid= ? AND serverseq >= ?  ?", docID, serverSeq)
+	changesRows, err := txn.QueryContext(ctx, "SELECT id, doc_id, server_seq, lamport, snapshot, created_at FROM snapshots WHERE doc_id= ? AND server_seq >= ?", docID, serverSeq)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("fetch syncedseqs: %w", err)
 	}
@@ -1367,7 +1371,7 @@ func (d *DB) FindMinSyncedSeqInfo(
 		return nil, fmt.Errorf("unable to create transaction: %w", err)
 	}
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM syncedseqs WHERE docid = ? ORDER BY serverseq ASC", docID)
+	rows := txn.QueryRowContext(ctx, "SELECT id, doc_id, client_id, lamport, actor_id FROM syncedseqs WHERE doc_id = ? ORDER BY server_seq ASC", docID)
 	info, err := readRowIntoSyncedSeqInfo(rows.Scan)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("fetch syncedseqs: %w", err)
@@ -1406,7 +1410,7 @@ func (d *DB) UpdateAndFindMinSyncedTicket(
 	}
 	defer txn.Rollback()
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM syncedseqs WHERE docid = ? AND lamport = ? AND actorid = ? ORDER BY serverseq ASC", docID, 0, time.InitialActorID.String())
+	rows := txn.QueryRowContext(ctx, "SELECT id, doc_id, client_id, lamport, actor_id FROM syncedseqs WHERE doc_id = ? AND lamport = ? AND actor_id = ? ORDER BY server_seq ASC", docID, 0, time.InitialActorID.String())
 	syncedSeqInfo, err := readRowIntoSyncedSeqInfo(rows.Scan)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("fetch syncedseqs: %w", err)
@@ -1477,7 +1481,7 @@ func (d *DB) UpdateSyncedSeq(
 	}
 
 	noRows := false
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM syncedseqs WHERE docid = ? AND clientid = ? ORDER BY serverseq ASC", docID, clientInfo.ID.String())
+	rows := txn.QueryRowContext(ctx, "SELECT id, doc_id, client_id, lamport, actor_id FROM syncedseqs WHERE doc_id = ? AND clientid = ? ORDER BY server_seq ASC", docID, clientInfo.ID.String())
 	info, err := readRowIntoSyncedSeqInfo(rows.Scan)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -1496,15 +1500,15 @@ func (d *DB) UpdateSyncedSeq(
 	if noRows {
 		// insert
 		syncedSeqInfo.ID = newID()
-		if _, err := txn.ExecContext(ctx, "INSERT INTO ? ( id, doc_id, client_id, lamport, actor_id, server_seq) VALUES(?,?,?,?,?,?)",
-			tblSyncedSeqs, syncedSeqInfo.ID, syncedSeqInfo.DocID, syncedSeqInfo.ClientID, syncedSeqInfo.Lamport, syncedSeqInfo.ActorID, syncedSeqInfo.ServerSeq); err != nil {
+		if _, err := txn.ExecContext(ctx, "INSERT INTO syncedseqs ( id, doc_id, client_id, lamport, actor_id, server_seq) VALUES(?,?,?,?,?,?)",
+			syncedSeqInfo.ID, syncedSeqInfo.DocID, syncedSeqInfo.ClientID, syncedSeqInfo.Lamport, syncedSeqInfo.ActorID, syncedSeqInfo.ServerSeq); err != nil {
 			return fmt.Errorf("insert syncedseqs of %s: %w", docID.String(), err)
 		}
 	} else {
 		// update
 		syncedSeqInfo.ID = info.ID
-		if _, err := txn.ExecContext(ctx, "UPDATE ? SET docid=?,clientid=?, lamport=?, actorid=?, serverseq=? where id=?",
-			tblSyncedSeqs, syncedSeqInfo.DocID, syncedSeqInfo.ClientID, syncedSeqInfo.Lamport, syncedSeqInfo.ActorID, syncedSeqInfo.ServerSeq, syncedSeqInfo.ID); err != nil {
+		if _, err := txn.ExecContext(ctx, "UPDATE syncedseqs SET doc_id=?,client_id=?, lamport=?, actor_id=?, server_seq=? where id=?",
+			syncedSeqInfo.DocID, syncedSeqInfo.ClientID, syncedSeqInfo.Lamport, syncedSeqInfo.ActorID, syncedSeqInfo.ServerSeq, syncedSeqInfo.ID); err != nil {
 			return fmt.Errorf("update syncedseqs of %s: %w", docID.String(), err)
 		}
 	}
@@ -1540,7 +1544,7 @@ func (d *DB) FindDocInfosByPaging(
 	}
 
 	// TODO(kpfaulkner) figure out the offset?
-	rows, err := txn.QueryContext(ctx, "SELECT * FROM documents WHERE projectid = ? AND id >= ?", projectID.String(), offset)
+	rows, err := txn.QueryContext(ctx, "SELECT id,project_id,key,server_seq,owner, created_at, accessed_at, updated_at FROM documents WHERE project_id = ? AND id >= ?", projectID.String(), offset)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("fetch documents of %s: %w", projectID.String(), err)
 	}
@@ -1580,7 +1584,7 @@ func (d *DB) FindDocInfosByQuery(
 	defer txn.Rollback()
 
 	// key has prefix?
-	rows, err := txn.QueryContext(ctx, "SELECT * FROM documents WHERE projectid = ? AND key like '?%'", projectID.String(), query)
+	rows, err := txn.QueryContext(ctx, "SELECT id,project_id,key,server_seq,owner, created_at, accessed_at, updated_at FROM documents WHERE project_id = ? AND key like '?%'", projectID.String(), query)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("find docInfos by query: %w", err)
 	}
@@ -1616,7 +1620,7 @@ func (d *DB) findTicketByServerSeq(
 
 	// no context... make a temp one...  TODO(kpfaulkner) change this.
 	ctx := context.Background()
-	row := txn.QueryRowContext(ctx, "SELECT * FROM changes WHERE docid = ? AND serverseq = ?", docID.String(), serverSeq)
+	row := txn.QueryRowContext(ctx, "SELECT id,doc_id,server_seq,client_seq,lamport, actor_id, message, operations FROM changes WHERE doc_id = ? AND server_seq = ?", docID.String(), serverSeq)
 	changeInfo, err := readRowIntoChangeInfo(row.Scan)
 	if err != nil {
 		if err == sql.ErrNoRows {
