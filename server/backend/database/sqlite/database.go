@@ -339,6 +339,9 @@ func (d *DB) FindProjectInfoByPublicKey(
 	ctx context.Context,
 	publicKey string,
 ) (*database.ProjectInfo, error) {
+	log.Printf("FindProjectInfoByPublicKey\n")
+	// cant keep creating transactions in passed context... then we'll get transactions in transactions errors.
+	ctx = context.Background()
 	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, fmt.Errorf("unable to create transaction: %w", err)
@@ -359,6 +362,10 @@ func (d *DB) FindProjectInfoByName(
 	owner types.ID,
 	name string,
 ) (*database.ProjectInfo, error) {
+	log.Printf("FindProjectInfoByName\n")
+
+	// cant keep creating transactions in passed context... then we'll get transactions in transactions errors.
+	ctx = context.Background()
 	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, fmt.Errorf("unable to create transaction: %w", err)
@@ -383,6 +390,9 @@ func (d *DB) FindProjectInfoByName(
 
 // FindProjectInfoByID returns a project by the given id.
 func (d *DB) FindProjectInfoByID(ctx context.Context, id types.ID) (*database.ProjectInfo, error) {
+	log.Printf("FindProjectInfoByID\n")
+	// cant keep creating transactions in passed context... then we'll get transactions in transactions errors.
+	ctx = context.Background()
 	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, fmt.Errorf("unable to create transaction: %w", err)
@@ -412,6 +422,7 @@ func (d *DB) EnsureDefaultUserAndProject(
 	username,
 	password string,
 ) (*database.UserInfo, *database.ProjectInfo, error) {
+	log.Printf("EnsureDefaultUserAndProject\n")
 	user, err := d.ensureDefaultUserInfo(ctx, username, password)
 	if err != nil {
 		return nil, nil, err
@@ -431,6 +442,8 @@ func (d *DB) ensureDefaultUserInfo(
 	username,
 	password string,
 ) (*database.UserInfo, error) {
+	log.Printf("ensureDefaultUserInfo\n")
+	ctx = context.Background()
 	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
 	if err != nil {
 		return nil, fmt.Errorf("unable to create transaction: %w", err)
@@ -438,7 +451,7 @@ func (d *DB) ensureDefaultUserInfo(
 
 	defer txn.Rollback()
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE owner = ? AND name = ?", tblUsers, username)
+	rows := txn.QueryRowContext(ctx, "SELECT id, username, hashed_password, created_at FROM users WHERE username = ?", username)
 	info, err := readRowIntoUserInfo(rows.Scan)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("find user by username: %w", err)
@@ -452,12 +465,12 @@ func (d *DB) ensureDefaultUserInfo(
 		info = database.NewUserInfo(username, hashedPassword)
 		info.ID = newID()
 
-		if _, err := txn.ExecContext(ctx, "INSERT INTO ? (id, username, hashed_password, created_at) VALUES(?, ?, ?, ?)", tblUsers, info.ID, info.Username, info.HashedPassword, info.CreatedAt); err != nil {
+		if _, err := txn.ExecContext(ctx, "INSERT INTO users (id, username, hashed_password, created_at) VALUES(?, ?, ?, ?)", info.ID, info.Username, info.HashedPassword, info.CreatedAt); err != nil {
 			return nil, fmt.Errorf("insert user: %w", err)
 		}
 	}
-
 	txn.Commit()
+
 	return info, nil
 }
 
@@ -466,13 +479,15 @@ func (d *DB) ensureDefaultProjectInfo(
 	ctx context.Context,
 	defaultUserID types.ID,
 ) (*database.ProjectInfo, error) {
+	// cant keep creating transactions in passed context... then we'll get transactions in transactions errors.
+	ctx = context.Background()
 	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
 	if err != nil {
 		return nil, fmt.Errorf("unable to create transaction: %w", err)
 	}
 
 	defer txn.Rollback()
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE id = ?", tblProjects, defaultUserID)
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM projects WHERE id = ?", database.DefaultProjectID.String())
 
 	info, err := readRowIntoProjectInfo(rows.Scan)
 	if err != nil && err != sql.ErrNoRows {
@@ -492,8 +507,9 @@ func (d *DB) ensureDefaultProjectInfo(
 
 func insertProjectInfo(ctx context.Context, txn *sql.Tx, info *database.ProjectInfo) error {
 	methods := strings.Join(info.AuthWebhookMethods, ";")
-	_, err := txn.ExecContext(ctx, "INSERT INTO ? (id, name, owner, public_key, secret_key, auth_webhook_url, auth_webhook_methods, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?);", tblProjects, info.ID, info.Name,
-		info.Owner, info.PublicKey, info.SecretKey, info.AuthWebhookURL, methods, info.CreatedAt, info.UpdatedAt)
+	_, err := txn.ExecContext(ctx, "INSERT INTO projects (id, name, owner, public_key, secret_key, auth_webhook_url, auth_webhook_methods, created_at, updated_at) "+
+		"VALUES(?,?,?,?,?,?,?,?,?);", info.ID, info.Name, info.Owner, info.PublicKey, info.SecretKey, info.AuthWebhookURL,
+		methods, info.CreatedAt, info.UpdatedAt)
 	return err
 }
 
@@ -508,6 +524,9 @@ func (d *DB) CreateProjectInfo(
 	name string,
 	owner types.ID,
 ) (*database.ProjectInfo, error) {
+	log.Printf("CreateProjectInfo\n")
+	// cant keep creating transactions in passed context... then we'll get transactions in transactions errors.
+	ctx = context.Background()
 	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
 	if err != nil {
 		return nil, fmt.Errorf("unable to create transaction: %w", err)
@@ -540,6 +559,9 @@ func (d *DB) ListProjectInfos(
 	ctx context.Context,
 	owner types.ID,
 ) ([]*database.ProjectInfo, error) {
+	log.Printf("ListProjectInfos\n")
+	// cant keep creating transactions in passed context... then we'll get transactions in transactions errors.
+	ctx = context.Background()
 	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, fmt.Errorf("unable to create transaction: %w", err)
@@ -547,7 +569,11 @@ func (d *DB) ListProjectInfos(
 	defer txn.Rollback()
 
 	var infos []*database.ProjectInfo
-	rows, err := txn.QueryContext(ctx, "SELECT * FROM ? WHERE owner = ?", tblProjects, owner.String())
+	rows, err := txn.QueryContext(ctx, "SELECT id, name, owners, public_key, secret_key, auth_webhook_url, auth_webhook_methods, created_at, updated_at FROM projects WHERE owner = ?", owner.String())
+	if err != nil && err != sql.ErrNoRows {
+		return nil, fmt.Errorf("find project by owner: %w", err)
+	}
+
 	for rows.Next() {
 		pi, err := readRowIntoProjectInfo(rows.Scan)
 		if err != nil {
@@ -569,6 +595,10 @@ func (d *DB) UpdateProjectInfo(
 	id types.ID,
 	fields *types.UpdatableProjectFields,
 ) (*database.ProjectInfo, error) {
+
+	log.Printf("UpdateProjectInfo\n")
+	// cant keep creating transactions in passed context... then we'll get transactions in transactions errors.
+	ctx = context.Background()
 	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
 	if err != nil {
 		return nil, fmt.Errorf("unable to create transaction: %w", err)
@@ -618,6 +648,9 @@ func (d *DB) CreateUserInfo(
 	username string,
 	hashedPassword string,
 ) (*database.UserInfo, error) {
+	log.Printf("CreateUserInfo\n")
+	// cant keep creating transactions in passed context... then we'll get transactions in transactions errors.
+	ctx = context.Background()
 	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
 	if err != nil {
 		return nil, fmt.Errorf("unable to create transaction: %w", err)
@@ -647,6 +680,9 @@ func (d *DB) CreateUserInfo(
 
 // FindUserInfo finds a user by the given username.
 func (d *DB) FindUserInfo(ctx context.Context, username string) (*database.UserInfo, error) {
+	log.Printf("FindUserInfo\n")
+	// cant keep creating transactions in passed context... then we'll get transactions in transactions errors.
+	ctx = context.Background()
 	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, fmt.Errorf("unable to create transaction: %w", err)
@@ -657,7 +693,7 @@ func (d *DB) FindUserInfo(ctx context.Context, username string) (*database.UserI
 	// TODO(kpfaulkner)
 	defer txn.Rollback()
 
-	row := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE username = ? ", tblUsers, username)
+	row := txn.QueryRowContext(ctx, "SELECT id, username,hashed_password, created_at  FROM users WHERE username = ? ", username)
 	userInfo, err := readRowIntoUserInfo(row.Scan)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -673,6 +709,9 @@ func (d *DB) FindUserInfo(ctx context.Context, username string) (*database.UserI
 func (d *DB) ListUserInfos(
 	ctx context.Context,
 ) ([]*database.UserInfo, error) {
+	log.Printf("ListUserInfos\n")
+	// cant keep creating transactions in passed context... then we'll get transactions in transactions errors.
+	ctx = context.Background()
 	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, fmt.Errorf("unable to create transaction: %w", err)
@@ -714,7 +753,9 @@ func (d *DB) ActivateClient(
 	projectID types.ID,
 	key string,
 ) (*database.ClientInfo, error) {
-
+	log.Printf("ActivateClient\n")
+	// cant keep creating transactions in passed context... then we'll get transactions in transactions errors.
+	ctx = context.Background()
 	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
 	if err != nil {
 		return nil, fmt.Errorf("unable to create transaction: %w", err)
@@ -759,10 +800,13 @@ func (d *DB) ActivateClient(
 
 // DeactivateClient deactivates a client.
 func (d *DB) DeactivateClient(ctx context.Context, projectID, clientID types.ID) (*database.ClientInfo, error) {
+	log.Printf("DeactivateClient\n")
 	if err := clientID.Validate(); err != nil {
 		return nil, err
 	}
 
+	// cant keep creating transactions in passed context... then we'll get transactions in transactions errors.
+	ctx = context.Background()
 	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
 	if err != nil {
 		return nil, fmt.Errorf("unable to create transaction: %w", err)
@@ -795,10 +839,13 @@ func (d *DB) DeactivateClient(ctx context.Context, projectID, clientID types.ID)
 
 // FindClientInfoByID finds a client by ID.
 func (d *DB) FindClientInfoByID(ctx context.Context, projectID, clientID types.ID) (*database.ClientInfo, error) {
+	log.Printf("FindClientInfoByID\n")
 	if err := clientID.Validate(); err != nil {
 		return nil, err
 	}
 
+	// cant keep creating transactions in passed context... then we'll get transactions in transactions errors.
+	ctx = context.Background()
 	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
 	if err != nil {
 		return nil, fmt.Errorf("unable to create transaction: %w", err)
@@ -829,12 +876,15 @@ func (d *DB) UpdateClientInfoAfterPushPull(
 	clientInfo *database.ClientInfo,
 	docInfo *database.DocInfo,
 ) error {
+	log.Printf("UpdateClientInfoAfterPushPull\n")
 	clientDocInfo := clientInfo.Documents[docInfo.ID]
 	attached, err := clientInfo.IsAttached(docInfo.ID)
 	if err != nil {
 		return err
 	}
 
+	// cant keep creating transactions in passed context... then we'll get transactions in transactions errors.
+	ctx = context.Background()
 	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
 	if err != nil {
 		return fmt.Errorf("unable to create transaction: %w", err)
@@ -892,10 +942,15 @@ func (d *DB) FindDeactivateCandidates(
 	inactiveThreshold gotime.Duration,
 	candidatesLimit int,
 ) ([]*database.ClientInfo, error) {
+	log.Printf("FindDeactivateCandidates\n")
+
+	// cant keep creating transactions in passed context... then we'll get transactions in transactions errors.
+	ctx = context.Background()
 	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, fmt.Errorf("unable to create transaction: %w", err)
 	}
+
 	defer txn.Rollback()
 
 	var infos []*database.ClientInfo
@@ -904,7 +959,15 @@ func (d *DB) FindDeactivateCandidates(
 	offset := gotime.Now().Add(-inactiveThreshold)
 
 	// TODO(kpfaulkner) will need to check sqlite time comparrison.
-	rows, err := txn.QueryContext(ctx, "SELECT * FROM ? WHERE status = ? AND updatedat > ?", tblClients, database.ClientActivated, offset)
+	rows, err := txn.QueryContext(ctx, "SELECT * FROM clients WHERE status = ? AND updated_at >  datetime(?, 'unixepoch')", database.ClientActivated, offset)
+	//rows, err := txn.QueryContext(ctx, "SELECT * FROM clients WHERE status = '?' ", database.ClientActivated)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			// no rows... just return nil?
+			return nil, nil
+		}
+		return nil, fmt.Errorf("find deactivate candidates: %w", err)
+	}
 	for rows.Next() {
 		info, err := readRowIntoClientInfo(rows.Scan)
 		if err != nil {
@@ -919,6 +982,8 @@ func (d *DB) FindDeactivateCandidates(
 		infos = append(infos, info)
 	}
 
+	fmt.Printf("about to do normal rollback\n")
+	txn.Rollback()
 	return infos, nil
 }
 
@@ -932,7 +997,9 @@ func (d *DB) FindDocInfoByKeyAndOwner(
 	key key.Key,
 	createDocIfNotExist bool,
 ) (*database.DocInfo, error) {
-
+	log.Printf("FindDocInfoByKeyAndOwner\n")
+	// cant keep creating transactions in passed context... then we'll get transactions in transactions errors.
+	ctx = context.Background()
 	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
 	if err != nil {
 		return nil, fmt.Errorf("unable to create transaction: %w", err)
@@ -978,7 +1045,9 @@ func (d *DB) FindDocInfoByKey(
 	projectID types.ID,
 	key key.Key,
 ) (*database.DocInfo, error) {
-
+	log.Printf("FindDocInfoByKey\n")
+	// cant keep creating transactions in passed context... then we'll get transactions in transactions errors.
+	ctx = context.Background()
 	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, fmt.Errorf("unable to create transaction: %w", err)
@@ -1003,7 +1072,9 @@ func (d *DB) FindDocInfoByID(
 	ctx context.Context,
 	id types.ID,
 ) (*database.DocInfo, error) {
-
+	log.Printf("FindDocInfoByID\n")
+	// cant keep creating transactions in passed context... then we'll get transactions in transactions errors.
+	ctx = context.Background()
 	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, fmt.Errorf("unable to create transaction: %w", err)
@@ -1031,7 +1102,9 @@ func (d *DB) CreateChangeInfos(
 	initialServerSeq int64,
 	changes []*change.Change,
 ) error {
-
+	log.Printf("CreateChangeInfos\n")
+	// cant keep creating transactions in passed context... then we'll get transactions in transactions errors.
+	ctx = context.Background()
 	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
 	if err != nil {
 		return fmt.Errorf("unable to create transaction: %w", err)
@@ -1089,6 +1162,9 @@ func (d *DB) PurgeStaleChanges(
 	ctx context.Context,
 	docID types.ID,
 ) error {
+	log.Printf("PurgeStaleChanges\n")
+	// cant keep creating transactions in passed context... then we'll get transactions in transactions errors.
+	ctx = context.Background()
 	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
 	if err != nil {
 		return fmt.Errorf("unable to create transaction: %w", err)
@@ -1142,6 +1218,7 @@ func (d *DB) FindChangesBetweenServerSeqs(
 	from int64,
 	to int64,
 ) ([]*change.Change, error) {
+	log.Printf("FindChangesBetweenServerSeqs\n")
 	infos, err := d.FindChangeInfosBetweenServerSeqs(ctx, docID, from, to)
 	if err != nil {
 		return nil, err
@@ -1167,7 +1244,9 @@ func (d *DB) FindChangeInfosBetweenServerSeqs(
 	from int64,
 	to int64,
 ) ([]*database.ChangeInfo, error) {
-
+	log.Printf("FindChangeInfosBetweenServerSeqs\n")
+	// cant keep creating transactions in passed context... then we'll get transactions in transactions errors.
+	ctx = context.Background()
 	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
 	if err != nil {
 		return nil, fmt.Errorf("unable to create transaction: %w", err)
@@ -1208,11 +1287,14 @@ func (d *DB) CreateSnapshotInfo(
 	docID types.ID,
 	doc *document.InternalDocument,
 ) error {
+	log.Printf("CreateSnapshotInfo\n")
 	snapshot, err := converter.ObjectToBytes(doc.RootObject())
 	if err != nil {
 		return err
 	}
 
+	// cant keep creating transactions in passed context... then we'll get transactions in transactions errors.
+	ctx = context.Background()
 	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
 	if err != nil {
 		return fmt.Errorf("unable to create transaction: %w", err)
@@ -1236,7 +1318,9 @@ func (d *DB) FindClosestSnapshotInfo(
 	docID types.ID,
 	serverSeq int64,
 ) (*database.SnapshotInfo, error) {
-
+	log.Printf("FindClosestSnapshotInfo\n")
+	// cant keep creating transactions in passed context... then we'll get transactions in transactions errors.
+	ctx = context.Background()
 	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, fmt.Errorf("unable to create transaction: %w", err)
@@ -1275,7 +1359,9 @@ func (d *DB) FindMinSyncedSeqInfo(
 	ctx context.Context,
 	docID types.ID,
 ) (*database.SyncedSeqInfo, error) {
-
+	log.Printf("FindMinSyncedSeqInfo\n")
+	// cant keep creating transactions in passed context... then we'll get transactions in transactions errors.
+	ctx = context.Background()
 	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, fmt.Errorf("unable to create transaction: %w", err)
@@ -1307,11 +1393,13 @@ func (d *DB) UpdateAndFindMinSyncedTicket(
 	docID types.ID,
 	serverSeq int64,
 ) (*time.Ticket, error) {
-
+	log.Printf("UpdateAndFindMinSyncedTicket\n")
 	if err := d.UpdateSyncedSeq(ctx, clientInfo, docID, serverSeq); err != nil {
 		return nil, err
 	}
 
+	// cant keep creating transactions in passed context... then we'll get transactions in transactions errors.
+	ctx = context.Background()
 	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, fmt.Errorf("unable to create transaction: %w", err)
@@ -1349,6 +1437,9 @@ func (d *DB) UpdateSyncedSeq(
 	docID types.ID,
 	serverSeq int64,
 ) error {
+	log.Printf("UpdateSyncedSeq\n")
+	// cant keep creating transactions in passed context... then we'll get transactions in transactions errors.
+	ctx = context.Background()
 	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return fmt.Errorf("unable to create transaction: %w", err)
@@ -1427,8 +1518,11 @@ func (d *DB) FindDocInfosByPaging(
 	projectID types.ID,
 	paging types.Paging[types.ID],
 ) ([]*database.DocInfo, error) {
-
+	log.Printf("FindDocInfosByPaging\n")
 	var err error
+
+	// cant keep creating transactions in passed context... then we'll get transactions in transactions errors.
+	ctx = context.Background()
 	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, fmt.Errorf("unable to create transaction: %w", err)
@@ -1476,6 +1570,9 @@ func (d *DB) FindDocInfosByQuery(
 	query string,
 	pageSize int,
 ) (*types.SearchResult[*database.DocInfo], error) {
+	log.Printf("FindDocInfosByQuery\n")
+	// cant keep creating transactions in passed context... then we'll get transactions in transactions errors.
+	ctx = context.Background()
 	txn, err := d.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, fmt.Errorf("unable to create transaction: %w", err)
@@ -1487,8 +1584,6 @@ func (d *DB) FindDocInfosByQuery(
 	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("find docInfos by query: %w", err)
 	}
-
-	/////////////////////
 
 	var docInfos []*database.DocInfo
 	count := 0
@@ -1513,6 +1608,8 @@ func (d *DB) findTicketByServerSeq(
 	docID types.ID,
 	serverSeq int64,
 ) (*time.Ticket, error) {
+
+	log.Printf("findTicketByServerSeq\n")
 	if serverSeq == change.InitialServerSeq {
 		return time.InitialTicket, nil
 	}

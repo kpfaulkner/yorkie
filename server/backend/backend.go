@@ -26,14 +26,13 @@ import (
 	"time"
 
 	"github.com/rs/xid"
-	"github.com/yorkie-team/yorkie/server/backend/database/sqlite"
-
 	"github.com/yorkie-team/yorkie/api/types"
 	"github.com/yorkie-team/yorkie/pkg/cache"
 	"github.com/yorkie-team/yorkie/server/backend/background"
 	"github.com/yorkie-team/yorkie/server/backend/database"
 	memdb "github.com/yorkie-team/yorkie/server/backend/database/memory"
 	"github.com/yorkie-team/yorkie/server/backend/database/mongo"
+	"github.com/yorkie-team/yorkie/server/backend/database/sqlite"
 	"github.com/yorkie-team/yorkie/server/backend/housekeeping"
 	"github.com/yorkie-team/yorkie/server/backend/sync"
 	"github.com/yorkie-team/yorkie/server/backend/sync/etcd"
@@ -81,19 +80,32 @@ func New(
 	bg := background.New()
 
 	var db database.Database
+	var housekeepingDB database.Database
+
 	if mongoConf != nil {
 		db, err = mongo.Dial(mongoConf)
 		if err != nil {
 			return nil, err
 		}
 	} else {
-		_, err = memdb.New()
-		if err != nil {
-			return nil, err
-		}
-		db, err = sqlite.New("test.db")
-		if err != nil {
-			return nil, err
+		if false {
+			db, err = memdb.New()
+			if err != nil {
+				return nil, err
+			}
+
+			housekeepingDB = db
+		} else {
+			db, err = sqlite.New("test.db")
+			if err != nil {
+				return nil, err
+			}
+
+			// mistake??
+			housekeepingDB, err = sqlite.New("test.db")
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -119,7 +131,7 @@ func New(
 
 	keeping, err := housekeeping.Start(
 		housekeepingConf,
-		db,
+		housekeepingDB,
 		coordinator,
 	)
 	if err != nil {
