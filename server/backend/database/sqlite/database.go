@@ -348,7 +348,7 @@ func (d *DB) FindProjectInfoByPublicKey(
 	}
 
 	defer txn.Rollback()
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE public_key = ?", tblProjects, publicKey)
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM projects WHERE public_key = ?", publicKey)
 	projectInfo, err := readRowIntoProjectInfo(rows.Scan)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", publicKey, database.ErrProjectNotFound)
@@ -376,7 +376,7 @@ func (d *DB) FindProjectInfoByName(
 	// TODO(kpfaulkner)
 	defer txn.Rollback()
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE owner = ? AND name = ?", tblProjects, owner.String(), name)
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM projects WHERE owner = ? AND name = ?", owner.String(), name)
 	projectInfo, err := readRowIntoProjectInfo(rows.Scan)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -403,7 +403,7 @@ func (d *DB) FindProjectInfoByID(ctx context.Context, id types.ID) (*database.Pr
 	// TODO(kpfaulkner)
 	defer txn.Rollback()
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE id = ?", tblProjects, id)
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM projects WHERE id = ?", id)
 
 	projectInfo, err := readRowIntoProjectInfo(rows.Scan)
 	if err != nil {
@@ -533,7 +533,7 @@ func (d *DB) CreateProjectInfo(
 	}
 	defer txn.Rollback()
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE owner = ? AND name = ?", tblProjects, owner.String(), name)
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM tables WHERE owner = ? AND name = ?", owner.String(), name)
 	projectInfo, err := readRowIntoProjectInfo(rows.Scan)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("find project by owner and name: %w", err)
@@ -606,7 +606,7 @@ func (d *DB) UpdateProjectInfo(
 
 	defer txn.Rollback()
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE id = ?", tblProjects, id)
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM projects WHERE id = ?", tblProjects, id)
 	projectInfo, err := readRowIntoProjectInfo(rows.Scan)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -657,7 +657,7 @@ func (d *DB) CreateUserInfo(
 	}
 	defer txn.Rollback()
 
-	row := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE username = ?", tblUsers, username)
+	row := txn.QueryRowContext(ctx, "SELECT * FROM users WHERE username = ?", tblUsers, username)
 	userInfo, err := readRowIntoUserInfo(row.Scan)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("find username: %w", err)
@@ -719,7 +719,7 @@ func (d *DB) ListUserInfos(
 	defer txn.Rollback()
 
 	var infos []*database.UserInfo
-	rows, err := txn.QueryContext(ctx, "SELECT * FROM ?", tblUsers)
+	rows, err := txn.QueryContext(ctx, "SELECT * FROM users")
 	if err != nil {
 		return nil, fmt.Errorf("fetch users: %w", err)
 	}
@@ -763,7 +763,7 @@ func (d *DB) ActivateClient(
 
 	defer txn.Rollback()
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE projectid = ? AND key = ?", tblClients, projectID, key)
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM clients WHERE projectid = ? AND key = ?", projectID, key)
 	existingClientInfo, err := readRowIntoClientInfo(rows.Scan)
 
 	noClientExists := false
@@ -814,7 +814,7 @@ func (d *DB) DeactivateClient(ctx context.Context, projectID, clientID types.ID)
 
 	defer txn.Rollback()
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE id = ? ", tblClients, clientID)
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM clients WHERE id = ? ", clientID)
 	clientInfo, err := readRowIntoClientInfo(rows.Scan)
 
 	if err != nil && err != sql.ErrNoRows {
@@ -853,7 +853,7 @@ func (d *DB) FindClientInfoByID(ctx context.Context, projectID, clientID types.I
 
 	defer txn.Rollback()
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE id = ? ", tblClients, clientID)
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM clients WHERE id = ? ", clientID)
 	clientInfo, err := readRowIntoClientInfo(rows.Scan)
 
 	if err != nil && err != sql.ErrNoRows {
@@ -892,7 +892,7 @@ func (d *DB) UpdateClientInfoAfterPushPull(
 
 	defer txn.Rollback()
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE id = ? ", tblClients, clientInfo.ID)
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM clients WHERE id = ? ", clientInfo.ID)
 	loaded, err := readRowIntoClientInfo(rows.Scan)
 
 	if err != nil && err != sql.ErrNoRows {
@@ -1007,7 +1007,7 @@ func (d *DB) FindDocInfoByKeyAndOwner(
 
 	defer txn.Rollback()
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE projectid = ? AND key = ?", tblDocuments, projectID.String(), key.String())
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM documents WHERE projectid = ? AND key = ?", projectID.String(), key.String())
 	docInfo, err := readRowIntoDocInfo(rows.Scan)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("find document by key: %w", err)
@@ -1055,7 +1055,7 @@ func (d *DB) FindDocInfoByKey(
 
 	defer txn.Rollback()
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE projectid = ? AND key = ?", tblDocuments, projectID.String(), key.String())
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM documents WHERE projectid = ? AND key = ?", projectID.String(), key.String())
 	docInfo, err := readRowIntoDocInfo(rows.Scan)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -1082,7 +1082,7 @@ func (d *DB) FindDocInfoByID(
 
 	defer txn.Rollback()
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE id = ?", tblDocuments, id.String())
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM documents WHERE id = ?", id.String())
 	docInfo, err := readRowIntoDocInfo(rows.Scan)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -1130,7 +1130,7 @@ func (d *DB) CreateChangeInfos(
 		}
 	}
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE projectid = ? AND key = ?", tblDocuments, projectID.String(), docInfo.Key.String())
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM documents WHERE projectid = ? AND key = ?", projectID.String(), docInfo.Key.String())
 	loadedDocInfo, err := readRowIntoDocInfo(rows.Scan)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -1175,7 +1175,7 @@ func (d *DB) PurgeStaleChanges(
 
 	// We want the smallest syncedseqs for a given docID
 	// Logic a bit different to memdb.. TODO(kpfaulkner) go over this again.
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE docid = ? ORDER BY serverseq ASC", tblSyncedSeqs, docID)
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM syncedseqs WHERE docid = ? ORDER BY serverseq ASC", docID)
 	info, err := readRowIntoSyncedSeqInfo(rows.Scan)
 	if err != nil && err != sql.ErrNoRows {
 		return fmt.Errorf("fetch syncedseqs: %w", err)
@@ -1189,7 +1189,7 @@ func (d *DB) PurgeStaleChanges(
 		return nil
 	}
 
-	changesRows, err := txn.QueryContext(ctx, "SELECT * FROM ? WHERE docid= ? AND serverseq <= ?", tblChanges, docID, minSyncedServerSeq)
+	changesRows, err := txn.QueryContext(ctx, "SELECT * FROM changes WHERE docid= ? AND serverseq <= ?", docID, minSyncedServerSeq)
 	if err != nil && err != sql.ErrNoRows {
 		return fmt.Errorf("fetch syncedseqs: %w", err)
 	}
@@ -1202,7 +1202,7 @@ func (d *DB) PurgeStaleChanges(
 			return nil
 		}
 
-		if _, err := txn.ExecContext(ctx, "DELETE FROM ? WHERE id = ?", tblChanges, info.ID); err != nil {
+		if _, err := txn.ExecContext(ctx, "DELETE FROM changes WHERE id = ?", info.ID); err != nil {
 			return fmt.Errorf("delete change: %w", err)
 		}
 	}
@@ -1256,7 +1256,7 @@ func (d *DB) FindChangeInfosBetweenServerSeqs(
 
 	var infos []*database.ChangeInfo
 
-	changesRows, err := txn.QueryContext(ctx, "SELECT * FROM ? WHERE docid= ? AND serverseq >= ? AND serverseq < ?", tblChanges, docID, from, to)
+	changesRows, err := txn.QueryContext(ctx, "SELECT * FROM changes WHERE docid= ? AND serverseq >= ? AND serverseq < ?", docID, from, to)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("fetch syncedseqs: %w", err)
 	}
@@ -1327,7 +1327,7 @@ func (d *DB) FindClosestSnapshotInfo(
 	}
 
 	defer txn.Rollback()
-	changesRows, err := txn.QueryContext(ctx, "SELECT * FROM ? WHERE docid= ? AND serverseq >= ?  ?", tblSnapshots, docID, serverSeq)
+	changesRows, err := txn.QueryContext(ctx, "SELECT * FROM snapshots WHERE docid= ? AND serverseq >= ?  ?", docID, serverSeq)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("fetch syncedseqs: %w", err)
 	}
@@ -1367,7 +1367,7 @@ func (d *DB) FindMinSyncedSeqInfo(
 		return nil, fmt.Errorf("unable to create transaction: %w", err)
 	}
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE docid = ? ORDER BY serverseq ASC", tblSyncedSeqs, docID)
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM syncedseqs WHERE docid = ? ORDER BY serverseq ASC", docID)
 	info, err := readRowIntoSyncedSeqInfo(rows.Scan)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("fetch syncedseqs: %w", err)
@@ -1406,7 +1406,7 @@ func (d *DB) UpdateAndFindMinSyncedTicket(
 	}
 	defer txn.Rollback()
 
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE docid = ? AND lamport = ? AND actorid = ? ORDER BY serverseq ASC", tblSyncedSeqs, docID, 0, time.InitialActorID.String())
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM syncedseqs WHERE docid = ? AND lamport = ? AND actorid = ? ORDER BY serverseq ASC", docID, 0, time.InitialActorID.String())
 	syncedSeqInfo, err := readRowIntoSyncedSeqInfo(rows.Scan)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("fetch syncedseqs: %w", err)
@@ -1452,7 +1452,7 @@ func (d *DB) UpdateSyncedSeq(
 	}
 
 	if !isAttached {
-		if _, err := txn.ExecContext(ctx, "DELETE FROM ? WHERE id = ? AND clientid = ?", tblSyncedSeqs, docID.String(), clientInfo.ID.String()); err != nil {
+		if _, err := txn.ExecContext(ctx, "DELETE FROM syncedseqs WHERE id = ? AND clientid = ?", docID.String(), clientInfo.ID.String()); err != nil {
 			return fmt.Errorf("delete syncedseqs of %s: %w", docID.String(), err)
 		}
 		txn.Commit()
@@ -1477,7 +1477,7 @@ func (d *DB) UpdateSyncedSeq(
 	}
 
 	noRows := false
-	rows := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE docid = ? AND clientid = ? ORDER BY serverseq ASC", tblSyncedSeqs, docID, clientInfo.ID.String())
+	rows := txn.QueryRowContext(ctx, "SELECT * FROM syncedseqs WHERE docid = ? AND clientid = ? ORDER BY serverseq ASC", docID, clientInfo.ID.String())
 	info, err := readRowIntoSyncedSeqInfo(rows.Scan)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -1540,7 +1540,7 @@ func (d *DB) FindDocInfosByPaging(
 	}
 
 	// TODO(kpfaulkner) figure out the offset?
-	rows, err := txn.QueryContext(ctx, "SELECT * FROM ? WHERE projectid = ? AND id >= ?", tblDocuments, projectID.String(), offset)
+	rows, err := txn.QueryContext(ctx, "SELECT * FROM documents WHERE projectid = ? AND id >= ?", projectID.String(), offset)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("fetch documents of %s: %w", projectID.String(), err)
 	}
@@ -1580,7 +1580,7 @@ func (d *DB) FindDocInfosByQuery(
 	defer txn.Rollback()
 
 	// key has prefix?
-	rows, err := txn.QueryContext(ctx, "SELECT * FROM ? WHERE projectid = ? AND key like '?%'", tblDocuments, projectID.String(), query)
+	rows, err := txn.QueryContext(ctx, "SELECT * FROM documents WHERE projectid = ? AND key like '?%'", projectID.String(), query)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("find docInfos by query: %w", err)
 	}
@@ -1616,7 +1616,7 @@ func (d *DB) findTicketByServerSeq(
 
 	// no context... make a temp one...  TODO(kpfaulkner) change this.
 	ctx := context.Background()
-	row := txn.QueryRowContext(ctx, "SELECT * FROM ? WHERE docid = ? AND serverseq = ?", tblChanges, docID.String(), serverSeq)
+	row := txn.QueryRowContext(ctx, "SELECT * FROM changes WHERE docid = ? AND serverseq = ?", docID.String(), serverSeq)
 	changeInfo, err := readRowIntoChangeInfo(row.Scan)
 	if err != nil {
 		if err == sql.ErrNoRows {
